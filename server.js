@@ -34,7 +34,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   }
 }
 
-// ✅ 리포트 생성 (안정형)
+// ✅ 리포트 생성
 async function generateReport(trigger = "manual") {
   let reportText = "";
 
@@ -52,7 +52,7 @@ async function generateReport(trigger = "manual") {
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // 2️⃣ GPT 분석
+    // 2️⃣ GPT 분석 (핵심 수정)
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -63,7 +63,7 @@ async function generateReport(trigger = "manual") {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "gpt-4.1-mini",
+            model: "gpt-4o-mini", // ✅ 수정된 안정 모델
             messages: [
               {
                 role: "system",
@@ -91,13 +91,22 @@ ${content}
       );
 
       const gptData = await gptRes?.json();
+
+      // ✅ 디버깅 로그 (매우 중요)
+      console.log("🧠 GPT 전체 응답:", JSON.stringify(gptData, null, 2));
+
+      if (!gptRes || !gptRes.ok) {
+        console.log("❌ OpenAI 상태코드:", gptRes?.status);
+        console.log("❌ OpenAI 에러:", gptData);
+      }
+
       reportText = gptData?.choices?.[0]?.message?.content;
 
     } catch (err) {
       console.log("❌ GPT 실패:", err.message);
     }
 
-    // 3️⃣ fallback (핵심)
+    // 3️⃣ fallback
     if (!reportText) {
       reportText = `
 [임시 리포트 - 시스템 fallback]
@@ -111,7 +120,7 @@ ${content || "뉴스 데이터 없음"}
 `;
     }
 
-    // 4️⃣ 저장 (무조건)
+    // 4️⃣ 저장
     const id = new Date().toISOString();
 
     const newReport = {
@@ -147,21 +156,18 @@ ${content || "뉴스 데이터 없음"}
   }
 }
 
-// ✅ 수동 생성 (테스트용)
+// ✅ 수동 생성
 app.get("/news/generate", async (req, res) => {
   const result = await generateReport("manual");
   res.json(result);
 });
 
-// ✅ cron 자동화 (핵심)
-
-// 🌅 06:00
+// ✅ cron 자동화
 cron.schedule("0 6 * * *", () => {
   console.log("⏰ 06:00 자동 실행");
   generateReport("morning");
 });
 
-// 🌙 21:00
 cron.schedule("0 21 * * *", () => {
   console.log("⏰ 21:00 자동 실행");
   generateReport("evening");
