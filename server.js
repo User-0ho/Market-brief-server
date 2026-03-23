@@ -48,17 +48,14 @@ const keywords = [
   "economy","earnings","AI","semiconductor","geopolitics"
 ];
 
-// 🔥 후처리 함수 (핵심)
+// 후처리
 function refineReport(text) {
   if (!text) return text;
 
   return text
-    // 방향성 표현 교정
     .replace(/Bear\s*\+\s*(\d+)%/gi, "Bearish ($1%)")
     .replace(/Bull\s*\+\s*(\d+)%/gi, "Bullish ($1%)")
     .replace(/Neutral\s*\+\s*(\d+)%/gi, "Neutral ($1%)")
-
-    // 투자 문장 톤 완화
     .replace(/매도 포지션 구축/gi, "비중 축소 고려")
     .replace(/강한 매도/gi, "보수적 접근 필요")
     .replace(/적극 매수/gi, "비중 확대 고려");
@@ -105,7 +102,7 @@ async function generateReport(trigger = "manual") {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
 
-    // STEP2.5: 의미 클러스터링
+    // STEP2.5: 의미 클러스터링 (🔥 수정 포함)
     const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
     let structuredIssues = "";
@@ -125,12 +122,15 @@ async function generateReport(trigger = "manual") {
               {
                 role: "system",
                 content: `
-너는 금융 리서치 애널리스트다.
+너는 기관 금융 리서치 애널리스트다.
 
-뉴스를 분석하여:
-- 의미적으로 같은 이슈를 묶어라
-- 반복되는 핵심 이슈 3개만 추출
-- 각 이슈를 다음 형식으로 작성:
+반드시 지켜라:
+- 최소 2개 이상의 기사에서 반복된 이슈만 사용
+- 단일 뉴스 기반 이슈는 절대 포함 금지
+- 특정 기업, 단일 이벤트, 지역 뉴스 제외
+- 거시경제(금리, 유가, 인플레이션 등) 중심으로 추출
+
+출력 형식:
 
 [이슈명]
 - 상태 (상승/하락/압력/불확실)
@@ -162,7 +162,7 @@ ${JSON.stringify(topKeywordHints)}
     // STEP3: 매크로 데이터
     const macro = await getMacroData();
 
-    // STEP4: 최종 분석
+    // STEP4: 최종 분석 (🔥 동일 규칙 적용)
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -178,13 +178,14 @@ ${JSON.stringify(topKeywordHints)}
               {
                 role: "system",
                 content: `
-너는 기관 투자자 수준의 애널리스트다.
+너는 기관 투자자 수준 애널리스트다.
 
-다음을 반드시 지켜라:
-- 방향성은 반드시 확률(%)과 함께 제시
-- 단정적인 표현 금지 (매수/매도 대신 비중 조절 표현 사용)
+반드시 지켜라:
+- 반복된 핵심 이슈만 사용
+- 단일 뉴스 기반 판단 금지
+- 방향성 + 확률 (%) 포함
+- 단정적 표현 금지
 - 단기 / 중기 구분 필수
-- 데이터 기반 해석
 `
               },
               {
@@ -197,13 +198,12 @@ ${structuredIssues}
 - 유가: ${macro.oil}
 - 금리: ${macro.rate}
 
-다음 형식으로 작성:
+다음 형식:
 
 ### 1. 핵심 매크로 요약
 
 ### 2. 시장 방향성
-- Bull / Neutral / Bear 중 하나 선택
-- 반드시 확률 (%) 포함 (예: Bearish (65%))
+(Bullish / Neutral / Bearish + 확률 %)
 
 ### 3. 시간별 전망
 - 단기 (1~2주)
@@ -226,7 +226,6 @@ ${structuredIssues}
       const gptData = await gptRes?.json();
       reportText = gptData?.choices?.[0]?.message?.content;
 
-      // 🔥 후처리 적용
       reportText = refineReport(reportText);
 
     } catch (err) {
