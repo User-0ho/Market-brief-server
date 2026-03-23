@@ -10,10 +10,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const parser = new XMLParser();
 
-// ✅ CNBC RSS (안정)
+
+// ✅🔥 CORS 해결 (이거 핵심)
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  next();
+});
+
+
+// ✅ CNBC RSS
 const RSS_FEEDS = [
   "https://www.cnbc.com/id/100003114/device/rss/rss.html"
 ];
+
 
 app.get("/news", async (req, res) => {
   try {
@@ -35,7 +46,7 @@ app.get("/news", async (req, res) => {
 
     rssResponses.forEach(text => {
       const parsed = parser.parse(text);
-      const items = parsed.rss.channel.item;
+      const items = parsed.rss.channel.item || [];
 
       items.forEach(item => {
         rssArticles.push({
@@ -96,7 +107,7 @@ app.get("/news", async (req, res) => {
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // 7️⃣ GPT (🔥 리포트 + 신호 포함)
+    // 7️⃣ GPT 분석
     const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -110,17 +121,13 @@ app.get("/news", async (req, res) => {
             role: "system",
             content: `
 너는 미국 주식 투자 전문 애널리스트다.
-
-규칙:
-- 기사 기반 사실만 사용
-- 추측 금지
-- 시장 영향 중심 분석
+기사 기반 사실만 사용하고 추측은 금지한다.
 `
           },
           {
             role: "user",
             content: `
-다음 뉴스들을 분석해서 아래 형식으로 작성:
+다음 뉴스들을 분석해서 작성:
 
 [오늘의 시장 리포트]
 
@@ -128,7 +135,7 @@ app.get("/news", async (req, res) => {
 2. 시장 영향
 
 [투자 신호]
-- 시장 방향 (상승/하락/중립 + 확률 %)
+- 시장 방향 (상승/하락/중립 + 확률)
 - 상승 가능 섹터 3개
 - 주의 섹터 2개
 
@@ -163,10 +170,12 @@ ${content}
   }
 });
 
+
 // 상태 확인
 app.get("/", (req, res) => {
   res.send("✅ AI Market Report Server Running");
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running on ${PORT}`);
