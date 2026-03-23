@@ -19,8 +19,8 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// ✅ fetch timeout
-async function fetchWithTimeout(url, options = {}, timeout = 10000) {
+// ✅ fetch timeout (기본 30초로 확장)
+async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
@@ -52,7 +52,7 @@ async function generateReport(trigger = "manual") {
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // 2️⃣ GPT 분석 (핵심 수정)
+    // 2️⃣ GPT 분석 (핵심 안정화)
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -63,7 +63,7 @@ async function generateReport(trigger = "manual") {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "gpt-4o-mini", // ✅ 수정된 안정 모델
+            model: "gpt-4o-mini", // ✅ 안정 모델
             messages: [
               {
                 role: "system",
@@ -87,12 +87,13 @@ ${content}
               }
             ]
           })
-        }
+        },
+        30000 // ✅ OpenAI는 별도로 30초
       );
 
       const gptData = await gptRes?.json();
 
-      // ✅ 디버깅 로그 (매우 중요)
+      // ✅ 디버깅 로그 (문제 발생 시 원인 확인 가능)
       console.log("🧠 GPT 전체 응답:", JSON.stringify(gptData, null, 2));
 
       if (!gptRes || !gptRes.ok) {
