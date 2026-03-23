@@ -1,6 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
-import { XMLParser } from "fast-xml-parser";
+import cron from "node-cron";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,9 +8,6 @@ const PORT = process.env.PORT || 3000;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-const parser = new XMLParser();
-
-// 🔥 저장소
 let reports = {};
 
 // ✅ CORS
@@ -22,128 +19,164 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// 🔥 fetch timeout
+// ✅ fetch timeout
 async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
   try {
     return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    console.log("❌ fetch 실패:", err.message);
+    return null;
   } finally {
     clearTimeout(id);
   }
 }
 
-// 🔥 리포트 생성 함수
-async function generateReport() {
-  try {
-    if (!NEWS_API_KEY || !OPENAI_API_KEY) return;
+// ✅ 리포트 생성 (안정형)
+async function generateReport(trigger = "manual") {
+  let reportText = "";
 
+  try {
+    // 1️⃣ 뉴스 수집
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsRes = await fetchWithTimeout(newsUrl);
-    const newsData = await newsRes.json();
 
-    if (!newsData.articles) return;
+    const newsData = await newsRes?.json();
+    const articles = newsData?.articles?.slice(0, 10) || [];
 
-    const content = newsData.articles.slice(0, 10).map(a => `
+    const content = articles.map(a => `
 제목: ${a.title}
 설명: ${a.description}
 출처: ${a.source.name}
 `).join("\n\n");
 
-    const gptRes = await fetchWithTimeout(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4.1-mini",
-          messages: [
-            {
-              role: "system",
-              content: `
+    // 2️⃣ GPT 분석
+    try {
+      const gptRes = await fetchWithTimeout(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4.1-mini",
+            messages: [
+              {
+                role: "system",
+                content: `
 너는 미국 주식 애널리스트다.
-공통 뉴스 기반으로 분석하라.
+여러 기사에서 공통적으로 반복되는 핵심 이슈만 기반으로 분석하라.
+추측 금지.
 `
-            },
-            {
-              role: "user",
-              content: `
-[오늘의 시장 리포트]
+              },
+              {
+                role: "user",
+                content: `
+다음 뉴스들을 분석:
+
+1. 핵심 뉴스 3개
+2. 시장 영향
+3. 투자 관점 요약
+
 ${content}
 `
-            }
-          ]
-        })
-      }
-    );
+              }
+            ]
+          })
+        }
+      );
 
-    const gptData = await gptRes.json();
-    const reportText = gptData?.choices?.[0]?.message?.content;
+      const gptData = await gptRes?.json();
+      reportText = gptData?.choices?.[0]?.message?.content;
 
-    if (!reportText) return;
+    } catch (err) {
+      console.log("❌ GPT 실패:", err.message);
+    }
 
+    // 3️⃣ fallback (핵심)
+    if (!reportText) {
+      reportText = `
+[임시 리포트 - 시스템 fallback]
+
+현재 AI 분석이 정상적으로 생성되지 않았습니다.
+
+📌 수집된 뉴스:
+${content || "뉴스 데이터 없음"}
+
+⚠️ 이후 자동 복구됩니다.
+`;
+    }
+
+    // 4️⃣ 저장 (무조건)
     const id = new Date().toISOString();
 
-    reports[id] = {
+    const newReport = {
       id,
       createdAt: new Date(),
       report: reportText,
-      views: 0
+      views: 0,
+      trigger
     };
 
-    console.log("✅ 리포트 생성:", id);
+    reports[id] = newReport;
+
+    console.log(`✅ 리포트 생성 (${trigger}):`, id);
+
+    return newReport;
 
   } catch (err) {
-    console.log("❌ 생성 실패:", err.message);
+    console.log("❌ 전체 실패:", err.message);
+
+    const id = new Date().toISOString();
+
+    const fallback = {
+      id,
+      createdAt: new Date(),
+      report: "⚠️ 시스템 오류로 리포트 생성 실패",
+      views: 0,
+      trigger
+    };
+
+    reports[id] = fallback;
+
+    return fallback;
   }
 }
 
-// 🔥 수동 생성 (테스트용)
+// ✅ 수동 생성 (테스트용)
 app.get("/news/generate", async (req, res) => {
-  await generateReport();
-  res.json({ message: "리포트 생성 완료" });
+  const result = await generateReport("manual");
+  res.json(result);
 });
 
-// 🔥 자동 생성 (1시간 체크)
-setInterval(() => {
-  const now = new Date();
-  const hour = now.getHours();
+// ✅ cron 자동화 (핵심)
 
-  if (hour === 21 || hour === 6) {
-    generateReport();
-  }
-}, 60 * 60 * 1000);
+// 🌅 06:00
+cron.schedule("0 6 * * *", () => {
+  console.log("⏰ 06:00 자동 실행");
+  generateReport("morning");
+});
 
-// 🔥 30일 자동 삭제
-setInterval(() => {
-  const now = new Date();
+// 🌙 21:00
+cron.schedule("0 21 * * *", () => {
+  console.log("⏰ 21:00 자동 실행");
+  generateReport("evening");
+});
 
-  Object.keys(reports).forEach(id => {
-    const age = (now - new Date(reports[id].createdAt)) / (1000 * 60 * 60 * 24);
-
-    if (age > 30) {
-      delete reports[id];
-      console.log("🗑 삭제:", id);
-    }
-  });
-
-}, 6 * 60 * 60 * 1000);
-
-// 🔥 압축 함수
-function compressReport(text, level) {
-  if (level === "mid") return text.split("\n").slice(0, 10).join("\n");
-  if (level === "low") return text.split("\n").slice(0, 5).join("\n");
-  return text;
-}
-
-// 📌 최신
+// ✅ 최신 리포트
 app.get("/news/latest", (req, res) => {
   const keys = Object.keys(reports);
-  if (keys.length === 0) return res.json({ error: "리포트 없음" });
+
+  if (keys.length === 0) {
+    return res.json({
+      error: "리포트 없음",
+      message: "아직 생성된 리포트가 없습니다"
+    });
+  }
 
   const latest = reports[keys[keys.length - 1]];
   latest.views++;
@@ -151,37 +184,16 @@ app.get("/news/latest", (req, res) => {
   res.json(latest);
 });
 
-// 📌 목록
+// ✅ 히스토리
 app.get("/news/history", (req, res) => {
   res.json(Object.values(reports));
 });
 
-// 📌 상세
-app.get("/news/:id", (req, res) => {
-  const report = reports[req.params.id];
-  if (!report) return res.json({ error: "없음" });
-
-  const now = new Date();
-  const age = (now - new Date(report.createdAt)) / (1000 * 60 * 60 * 24);
-
-  let level = "full";
-  if (age > 7) level = "low";
-  else if (age > 3) level = "mid";
-
-  report.views++;
-
-  res.json({
-    ...report,
-    report: compressReport(report.report, level),
-    level
-  });
-});
-
-// 📌 루트
+// ✅ 상태 확인
 app.get("/", (req, res) => {
-  res.send("AI Market Report Server Running");
+  res.send("✅ AI Market Report Cron Server Running");
 });
 
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("🚀 Server running on port", PORT);
 });
