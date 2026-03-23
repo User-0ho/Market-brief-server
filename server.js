@@ -10,24 +10,23 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const parser = new XMLParser();
 
-// ✅ 안정적인 RSS (CNBC)
+// ✅ CNBC RSS (안정)
 const RSS_FEEDS = [
   "https://www.cnbc.com/id/100003114/device/rss/rss.html"
 ];
 
 app.get("/news", async (req, res) => {
   try {
-    // ✅ 1. API 키 체크
     if (!NEWS_API_KEY || !OPENAI_API_KEY) {
       return res.json({ error: "API 키 누락" });
     }
 
-    // ✅ 2. NewsAPI (business)
+    // 1️⃣ NewsAPI
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsRes = await fetch(newsUrl);
     const newsData = await newsRes.json();
 
-    // ✅ 3. RSS 가져오기 (CNBC)
+    // 2️⃣ RSS
     const rssResponses = await Promise.all(
       RSS_FEEDS.map(url => fetch(url).then(res => res.text()))
     );
@@ -48,10 +47,10 @@ app.get("/news", async (req, res) => {
       });
     });
 
-    // ✅ 4. 합치기
+    // 3️⃣ 통합
     const allArticles = [...newsData.articles, ...rssArticles];
 
-    // ✅ 5. 중복 제거 (제목 기준)
+    // 4️⃣ 중복 제거
     const uniqueMap = new Map();
     allArticles.forEach(article => {
       if (article.title) {
@@ -60,11 +59,10 @@ app.get("/news", async (req, res) => {
     });
     const uniqueArticles = Array.from(uniqueMap.values());
 
-    // ✅ 6. 필터링 (최종 버전)
+    // 5️⃣ 필터링
     const trustedArticles = uniqueArticles.filter(article => {
       const name = article.source.name?.toLowerCase() || "";
 
-      // ❌ 차단
       if (
         name.includes("gsmarena") ||
         name.includes("japan times") ||
@@ -74,7 +72,6 @@ app.get("/news", async (req, res) => {
         return false;
       }
 
-      // ✅ 허용
       return (
         name.includes("reuters") ||
         name.includes("bloomberg") ||
@@ -87,12 +84,10 @@ app.get("/news", async (req, res) => {
     });
 
     if (trustedArticles.length === 0) {
-      return res.json({
-        error: "신뢰 뉴스 없음"
-      });
+      return res.json({ error: "신뢰 뉴스 없음" });
     }
 
-    // ✅ 7. 최대 10개 사용
+    // 6️⃣ 최대 10개
     const finalArticles = trustedArticles.slice(0, 10);
 
     const content = finalArticles.map(a => `
@@ -101,7 +96,7 @@ app.get("/news", async (req, res) => {
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // ✅ 8. GPT 분석
+    // 7️⃣ GPT (🔥 리포트 + 신호 포함)
     const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -114,19 +109,30 @@ app.get("/news", async (req, res) => {
           {
             role: "system",
             content: `
-너는 금융 뉴스 분석가다.
-추측 금지, 기사 기반 사실만 사용.
+너는 미국 주식 투자 전문 애널리스트다.
+
+규칙:
+- 기사 기반 사실만 사용
+- 추측 금지
+- 시장 영향 중심 분석
 `
           },
           {
             role: "user",
             content: `
-다음 뉴스 분석:
+다음 뉴스들을 분석해서 아래 형식으로 작성:
+
+[오늘의 시장 리포트]
 
 1. 핵심 뉴스 3개
 2. 시장 영향
-3. 주목 섹터
 
+[투자 신호]
+- 시장 방향 (상승/하락/중립 + 확률 %)
+- 상승 가능 섹터 3개
+- 주의 섹터 2개
+
+뉴스:
 ${content}
 `
           }
@@ -146,7 +152,7 @@ ${content}
     res.json({
       total_articles: allArticles.length,
       trusted_articles: trustedArticles.length,
-      analysis: gptData.choices[0].message.content
+      report: gptData.choices[0].message.content
     });
 
   } catch (err) {
@@ -159,7 +165,7 @@ ${content}
 
 // 상태 확인
 app.get("/", (req, res) => {
-  res.send("✅ RSS Stable Server Running");
+  res.send("✅ AI Market Report Server Running");
 });
 
 app.listen(PORT, () => {
