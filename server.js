@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// ✅ fetch timeout (기본 30초로 확장)
+// ✅ fetch timeout (30초)
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -39,20 +39,48 @@ async function generateReport(trigger = "manual") {
   let reportText = "";
 
   try {
-    // 1️⃣ 뉴스 수집
-    const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
+    // 🔥 STEP1: 기관급 뉴스 수집 + 필터링
+
+    const trustedSources = [
+      "Reuters",
+      "Bloomberg",
+      "CNBC",
+      "Financial Times",
+      "BBC News",
+      "The Wall Street Journal",
+      "Associated Press"
+    ];
+
+    const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR interest rate OR oil OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=20&apiKey=${NEWS_API_KEY}`;
+
     const newsRes = await fetchWithTimeout(newsUrl);
-
     const newsData = await newsRes?.json();
-    const articles = newsData?.articles?.slice(0, 10) || [];
 
-    const content = articles.map(a => `
+    let articles = newsData?.articles || [];
+
+    // ✅ 신뢰도 필터링
+    let filteredArticles = articles.filter(a =>
+      trustedSources.includes(a.source.name)
+    );
+
+    // ✅ fallback (뉴스 부족 시 일부 허용)
+    if (filteredArticles.length < 5) {
+      console.log("⚠️ 신뢰 뉴스 부족 → 일부 일반 뉴스 포함");
+      filteredArticles = articles.slice(0, 10);
+    } else {
+      filteredArticles = filteredArticles.slice(0, 10);
+    }
+
+    console.log("📰 최종 기사 수:", filteredArticles.length);
+    console.log("📰 출처:", filteredArticles.map(a => a.source.name));
+
+    const content = filteredArticles.map(a => `
 제목: ${a.title}
 설명: ${a.description}
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // 2️⃣ GPT 분석 (핵심 안정화)
+    // 2️⃣ GPT 분석
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -63,7 +91,7 @@ async function generateReport(trigger = "manual") {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "gpt-4o-mini", // ✅ 안정 모델
+            model: "gpt-4o-mini",
             messages: [
               {
                 role: "system",
@@ -88,16 +116,15 @@ ${content}
             ]
           })
         },
-        30000 // ✅ OpenAI는 별도로 30초
+        30000
       );
 
       const gptData = await gptRes?.json();
 
-      // ✅ 디버깅 로그 (문제 발생 시 원인 확인 가능)
-      console.log("🧠 GPT 전체 응답:", JSON.stringify(gptData, null, 2));
+      console.log("🧠 GPT 응답:", JSON.stringify(gptData, null, 2));
 
       if (!gptRes || !gptRes.ok) {
-        console.log("❌ OpenAI 상태코드:", gptRes?.status);
+        console.log("❌ OpenAI 상태:", gptRes?.status);
         console.log("❌ OpenAI 에러:", gptData);
       }
 
