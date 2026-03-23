@@ -10,36 +10,48 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const parser = new XMLParser();
 
-// 🔥 Reuters RSS
-const REUTERS_RSS = "https://feeds.reuters.com/reuters/businessNews";
+// ✅ 안정적인 RSS (CNBC)
+const RSS_FEEDS = [
+  "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+];
 
 app.get("/news", async (req, res) => {
   try {
+    // ✅ 1. API 키 체크
     if (!NEWS_API_KEY || !OPENAI_API_KEY) {
       return res.json({ error: "API 키 누락" });
     }
 
-    // ✅ 1. NewsAPI 가져오기
+    // ✅ 2. NewsAPI (business)
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsRes = await fetch(newsUrl);
     const newsData = await newsRes.json();
 
-    // ✅ 2. RSS 가져오기 (Reuters)
-    const rssRes = await fetch(REUTERS_RSS);
-    const rssText = await rssRes.text();
-    const rssData = parser.parse(rssText);
+    // ✅ 3. RSS 가져오기 (CNBC)
+    const rssResponses = await Promise.all(
+      RSS_FEEDS.map(url => fetch(url).then(res => res.text()))
+    );
 
-    const rssArticles = rssData.rss.channel.item.map(item => ({
-      title: item.title,
-      description: item.description,
-      content: item.description,
-      source: { name: "Reuters" }
-    }));
+    let rssArticles = [];
 
-    // ✅ 3. NewsAPI + RSS 합치기
+    rssResponses.forEach(text => {
+      const parsed = parser.parse(text);
+      const items = parsed.rss.channel.item;
+
+      items.forEach(item => {
+        rssArticles.push({
+          title: item.title,
+          description: item.description,
+          content: item.description,
+          source: { name: "CNBC" }
+        });
+      });
+    });
+
+    // ✅ 4. 합치기
     const allArticles = [...newsData.articles, ...rssArticles];
 
-    // ✅ 4. 중복 제거 (제목 기준)
+    // ✅ 5. 중복 제거 (제목 기준)
     const uniqueMap = new Map();
     allArticles.forEach(article => {
       if (article.title) {
@@ -48,10 +60,11 @@ app.get("/news", async (req, res) => {
     });
     const uniqueArticles = Array.from(uniqueMap.values());
 
-    // ✅ 5. 신뢰 매체 필터링
+    // ✅ 6. 필터링 (최종 버전)
     const trustedArticles = uniqueArticles.filter(article => {
       const name = article.source.name?.toLowerCase() || "";
 
+      // ❌ 차단
       if (
         name.includes("gsmarena") ||
         name.includes("japan times") ||
@@ -61,6 +74,7 @@ app.get("/news", async (req, res) => {
         return false;
       }
 
+      // ✅ 허용
       return (
         name.includes("reuters") ||
         name.includes("bloomberg") ||
@@ -78,16 +92,16 @@ app.get("/news", async (req, res) => {
       });
     }
 
-    // ✅ 6. 최신순 정렬 (가능하면)
-    const sortedArticles = trustedArticles.slice(0, 10);
+    // ✅ 7. 최대 10개 사용
+    const finalArticles = trustedArticles.slice(0, 10);
 
-    const content = sortedArticles.map(a => `
+    const content = finalArticles.map(a => `
 제목: ${a.title}
 설명: ${a.description}
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // ✅ 7. GPT 분석
+    // ✅ 8. GPT 분석
     const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -143,8 +157,9 @@ ${content}
   }
 });
 
+// 상태 확인
 app.get("/", (req, res) => {
-  res.send("✅ RSS Integrated Server Running");
+  res.send("✅ RSS Stable Server Running");
 });
 
 app.listen(PORT, () => {
