@@ -7,12 +7,14 @@ const PORT = process.env.PORT || 3000;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// ✅ 신뢰 매체 (확장 버전)
 const TRUSTED_SOURCES = [
   "Reuters",
   "Bloomberg",
   "Wall Street Journal",
   "Financial Times",
-  "CNBC"
+  "CNBC",
+  "Associated Press"
 ];
 
 app.get("/news", async (req, res) => {
@@ -47,13 +49,19 @@ app.get("/news", async (req, res) => {
       )
     );
 
-    const finalArticles = trustedArticles.length > 0
-      ? trustedArticles
-      : newsData.articles;
+    // ❗ 핵심: 신뢰 뉴스 없으면 분석 안 함
+    if (trustedArticles.length === 0) {
+      return res.json({
+        error: "신뢰할 수 있는 뉴스 없음",
+        message: "현재 주요 매체 뉴스가 부족합니다. 잠시 후 다시 시도하세요."
+      });
+    }
 
-    // ✅ 4. 뉴스 데이터 구성
+    const finalArticles = trustedArticles;
+
+    // ✅ 4. 뉴스 데이터 구성 (최대 10개 제한)
     const content = finalArticles
-      .slice(0, 10) // 🔥 토큰 과다 방지 (중요)
+      .slice(0, 10)
       .map(a => `
 제목: ${a.title}
 설명: ${a.description}
@@ -62,7 +70,7 @@ app.get("/news", async (req, res) => {
 `)
       .join("\n\n");
 
-    // ✅ 5. GPT 호출
+    // ✅ 5. GPT 요청
     const gptResponse = await fetch(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -77,23 +85,24 @@ app.get("/news", async (req, res) => {
             {
               role: "system",
               content: `
-너는 금융 뉴스 분석가다.
+너는 미국 주식 투자자를 위한 금융 뉴스 분석가다.
 
-규칙:
-- 추측 금지
-- 기사 기반 사실만 사용
-- 없는 정보 생성 금지
+반드시 지켜야 할 규칙:
+- 기사에 없는 내용 절대 추가 금지
+- 추측, 과장 금지
+- 사실 기반만 사용
+- 시장 영향 중심 분석
 `
             },
             {
               role: "user",
               content: `
-다음 뉴스들을 분석해라.
+다음 뉴스들을 기반으로 분석해라.
 
-[출력]
+[출력 형식]
 1. 핵심 뉴스 3개
 2. 시장 영향
-3. 주목 섹터
+3. 주목할 섹터
 
 뉴스:
 ${content}
@@ -106,7 +115,7 @@ ${content}
 
     const gptData = await gptResponse.json();
 
-    // ✅ 6. GPT 에러 처리 (🔥 핵심)
+    // ✅ 6. GPT 응답 검증
     if (!gptData.choices) {
       return res.json({
         error: "GPT 응답 실패",
@@ -117,14 +126,14 @@ ${content}
     // ✅ 7. 정상 결과
     res.json({
       total_articles: newsData.articles.length,
-      used_articles: finalArticles.length,
+      trusted_articles: finalArticles.length,
       analysis: gptData.choices[0].message.content
     });
 
   } catch (error) {
     console.error("🔥 서버 에러:", error);
 
-    // ✅ 절대 서버 안 죽게
+    // ✅ 서버 절대 안 죽게
     res.json({
       error: "서버 내부 오류",
       message: error.message
@@ -132,6 +141,7 @@ ${content}
   }
 });
 
+// ✅ 기본 확인용
 app.get("/", (req, res) => {
   res.send("✅ Market Brief Server Running");
 });
