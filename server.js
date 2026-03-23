@@ -7,16 +7,6 @@ const PORT = process.env.PORT || 3000;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// ✅ 신뢰 매체 (확장 버전)
-const TRUSTED_SOURCES = [
-  "Reuters",
-  "Bloomberg",
-  "Wall Street Journal",
-  "Financial Times",
-  "CNBC",
-  "Associated Press"
-];
-
 app.get("/news", async (req, res) => {
   try {
     // ✅ 1. API 키 체크
@@ -30,8 +20,8 @@ app.get("/news", async (req, res) => {
       });
     }
 
-    // ✅ 2. 뉴스 가져오기
-    const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&apiKey=${NEWS_API_KEY}`;
+    // ✅ 2. 뉴스 가져오기 (🔥 business만)
+    const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsResponse = await fetch(newsUrl);
     const newsData = await newsResponse.json();
 
@@ -42,14 +32,22 @@ app.get("/news", async (req, res) => {
       });
     }
 
-    // ✅ 3. 신뢰 매체 필터링
-    const trustedArticles = newsData.articles.filter(article =>
-      TRUSTED_SOURCES.some(source =>
-        article.source.name?.includes(source)
-      )
-    );
+    // ✅ 3. 🔥 강제 신뢰 매체 필터링 (핵심)
+    const trustedArticles = newsData.articles.filter(article => {
+      const name = article.source.name?.toLowerCase() || "";
 
-    // ❗ 핵심: 신뢰 뉴스 없으면 분석 안 함
+      return (
+        name.includes("reuters") ||
+        name.includes("bloomberg") ||
+        name.includes("wall street journal") ||
+        name.includes("financial times") ||
+        name.includes("cnbc") ||
+        name.includes("associated press") ||
+        name.includes("ap news")
+      );
+    });
+
+    // ❗ 신뢰 뉴스 없으면 분석 안 함
     if (trustedArticles.length === 0) {
       return res.json({
         error: "신뢰할 수 있는 뉴스 없음",
@@ -59,7 +57,7 @@ app.get("/news", async (req, res) => {
 
     const finalArticles = trustedArticles;
 
-    // ✅ 4. 뉴스 데이터 구성 (최대 10개 제한)
+    // ✅ 4. 뉴스 데이터 구성 (최대 10개)
     const content = finalArticles
       .slice(0, 10)
       .map(a => `
@@ -133,7 +131,6 @@ ${content}
   } catch (error) {
     console.error("🔥 서버 에러:", error);
 
-    // ✅ 서버 절대 안 죽게
     res.json({
       error: "서버 내부 오류",
       message: error.message
@@ -141,7 +138,7 @@ ${content}
   }
 });
 
-// ✅ 기본 확인용
+// ✅ 서버 상태 확인용
 app.get("/", (req, res) => {
   res.send("✅ Market Brief Server Running");
 });
