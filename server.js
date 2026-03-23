@@ -22,7 +22,7 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// 🔥 timeout
+// 🔥 fetch timeout
 async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -34,9 +34,11 @@ async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   }
 }
 
-// 🔥 리포트 생성
+// 🔥 리포트 생성 함수
 async function generateReport() {
   try {
+    if (!NEWS_API_KEY || !OPENAI_API_KEY) return;
+
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsRes = await fetchWithTimeout(newsUrl);
     const newsData = await newsRes.json();
@@ -100,7 +102,13 @@ ${content}
   }
 }
 
-// 🔥 자동 실행 (1시간 체크)
+// 🔥 수동 생성 (테스트용)
+app.get("/news/generate", async (req, res) => {
+  await generateReport();
+  res.json({ message: "리포트 생성 완료" });
+});
+
+// 🔥 자동 생성 (1시간 체크)
 setInterval(() => {
   const now = new Date();
   const hour = now.getHours();
@@ -110,8 +118,7 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-
-// 🔥 오래된 데이터 삭제 (30일)
+// 🔥 30일 자동 삭제
 setInterval(() => {
   const now = new Date();
 
@@ -124,22 +131,14 @@ setInterval(() => {
     }
   });
 
-}, 6 * 60 * 60 * 1000); // 6시간마다 실행
-
+}, 6 * 60 * 60 * 1000);
 
 // 🔥 압축 함수
 function compressReport(text, level) {
-  if (level === "mid") {
-    return text.split("\n").slice(0, 10).join("\n");
-  }
-
-  if (level === "low") {
-    return text.split("\n").slice(0, 5).join("\n");
-  }
-
+  if (level === "mid") return text.split("\n").slice(0, 10).join("\n");
+  if (level === "low") return text.split("\n").slice(0, 5).join("\n");
   return text;
 }
-
 
 // 📌 최신
 app.get("/news/latest", (req, res) => {
@@ -157,7 +156,7 @@ app.get("/news/history", (req, res) => {
   res.json(Object.values(reports));
 });
 
-// 📌 상세 (압축 적용)
+// 📌 상세
 app.get("/news/:id", (req, res) => {
   const report = reports[req.params.id];
   if (!report) return res.json({ error: "없음" });
@@ -178,11 +177,11 @@ app.get("/news/:id", (req, res) => {
   });
 });
 
-// 상태
+// 📌 루트
 app.get("/", (req, res) => {
-  res.send("AI Market Report Running");
+  res.send("AI Market Report Server Running");
 });
 
 app.listen(PORT, () => {
-  console.log("Server running");
+  console.log("Server running on port", PORT);
 });
