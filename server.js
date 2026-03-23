@@ -10,173 +10,179 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const parser = new XMLParser();
 
+// 🔥 저장소
+let reports = {};
 
-// ✅🔥 CORS 해결 (이거 핵심)
+// ✅ CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   next();
 });
+app.options("*", (req, res) => res.sendStatus(200));
 
+// 🔥 timeout
+async function fetchWithTimeout(url, options = {}, timeout = 10000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
 
-// ✅ CNBC RSS
-const RSS_FEEDS = [
-  "https://www.cnbc.com/id/100003114/device/rss/rss.html"
-];
-
-
-app.get("/news", async (req, res) => {
   try {
-    if (!NEWS_API_KEY || !OPENAI_API_KEY) {
-      return res.json({ error: "API 키 누락" });
-    }
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
 
-    // 1️⃣ NewsAPI
+// 🔥 리포트 생성
+async function generateReport() {
+  try {
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
-    const newsRes = await fetch(newsUrl);
+    const newsRes = await fetchWithTimeout(newsUrl);
     const newsData = await newsRes.json();
 
-    // 2️⃣ RSS
-    const rssResponses = await Promise.all(
-      RSS_FEEDS.map(url => fetch(url).then(res => res.text()))
-    );
+    if (!newsData.articles) return;
 
-    let rssArticles = [];
-
-    rssResponses.forEach(text => {
-      const parsed = parser.parse(text);
-      const items = parsed.rss.channel.item || [];
-
-      items.forEach(item => {
-        rssArticles.push({
-          title: item.title,
-          description: item.description,
-          content: item.description,
-          source: { name: "CNBC" }
-        });
-      });
-    });
-
-    // 3️⃣ 통합
-    const allArticles = [...newsData.articles, ...rssArticles];
-
-    // 4️⃣ 중복 제거
-    const uniqueMap = new Map();
-    allArticles.forEach(article => {
-      if (article.title) {
-        uniqueMap.set(article.title, article);
-      }
-    });
-    const uniqueArticles = Array.from(uniqueMap.values());
-
-    // 5️⃣ 필터링
-    const trustedArticles = uniqueArticles.filter(article => {
-      const name = article.source.name?.toLowerCase() || "";
-
-      if (
-        name.includes("gsmarena") ||
-        name.includes("japan times") ||
-        name.includes("sports") ||
-        name.includes("entertainment")
-      ) {
-        return false;
-      }
-
-      return (
-        name.includes("reuters") ||
-        name.includes("bloomberg") ||
-        name.includes("wall street journal") ||
-        name.includes("financial times") ||
-        name.includes("cnbc") ||
-        name.includes("associated press") ||
-        name.includes("ap news")
-      );
-    });
-
-    if (trustedArticles.length === 0) {
-      return res.json({ error: "신뢰 뉴스 없음" });
-    }
-
-    // 6️⃣ 최대 10개
-    const finalArticles = trustedArticles.slice(0, 10);
-
-    const content = finalArticles.map(a => `
+    const content = newsData.articles.slice(0, 10).map(a => `
 제목: ${a.title}
 설명: ${a.description}
 출처: ${a.source.name}
 `).join("\n\n");
 
-    // 7️⃣ GPT 분석
-    const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
-너는 미국 주식 투자 전문 애널리스트다.
-기사 기반 사실만 사용하고 추측은 금지한다.
+    const gptRes = await fetchWithTimeout(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          messages: [
+            {
+              role: "system",
+              content: `
+너는 미국 주식 애널리스트다.
+공통 뉴스 기반으로 분석하라.
 `
-          },
-          {
-            role: "user",
-            content: `
-다음 뉴스들을 분석해서 작성:
-
+            },
+            {
+              role: "user",
+              content: `
 [오늘의 시장 리포트]
-
-1. 핵심 뉴스 3개
-2. 시장 영향
-
-[투자 신호]
-- 시장 방향 (상승/하락/중립 + 확률)
-- 상승 가능 섹터 3개
-- 주의 섹터 2개
-
-뉴스:
 ${content}
 `
-          }
-        ]
-      })
-    });
+            }
+          ]
+        })
+      }
+    );
 
     const gptData = await gptRes.json();
+    const reportText = gptData?.choices?.[0]?.message?.content;
 
-    if (!gptData.choices) {
-      return res.json({
-        error: "GPT 오류",
-        detail: gptData
-      });
-    }
+    if (!reportText) return;
 
-    res.json({
-      total_articles: allArticles.length,
-      trusted_articles: trustedArticles.length,
-      report: gptData.choices[0].message.content
-    });
+    const id = new Date().toISOString();
+
+    reports[id] = {
+      id,
+      createdAt: new Date(),
+      report: reportText,
+      views: 0
+    };
+
+    console.log("✅ 리포트 생성:", id);
 
   } catch (err) {
-    res.json({
-      error: "서버 오류",
-      message: err.message
-    });
+    console.log("❌ 생성 실패:", err.message);
   }
+}
+
+// 🔥 자동 실행 (1시간 체크)
+setInterval(() => {
+  const now = new Date();
+  const hour = now.getHours();
+
+  if (hour === 21 || hour === 6) {
+    generateReport();
+  }
+}, 60 * 60 * 1000);
+
+
+// 🔥 오래된 데이터 삭제 (30일)
+setInterval(() => {
+  const now = new Date();
+
+  Object.keys(reports).forEach(id => {
+    const age = (now - new Date(reports[id].createdAt)) / (1000 * 60 * 60 * 24);
+
+    if (age > 30) {
+      delete reports[id];
+      console.log("🗑 삭제:", id);
+    }
+  });
+
+}, 6 * 60 * 60 * 1000); // 6시간마다 실행
+
+
+// 🔥 압축 함수
+function compressReport(text, level) {
+  if (level === "mid") {
+    return text.split("\n").slice(0, 10).join("\n");
+  }
+
+  if (level === "low") {
+    return text.split("\n").slice(0, 5).join("\n");
+  }
+
+  return text;
+}
+
+
+// 📌 최신
+app.get("/news/latest", (req, res) => {
+  const keys = Object.keys(reports);
+  if (keys.length === 0) return res.json({ error: "리포트 없음" });
+
+  const latest = reports[keys[keys.length - 1]];
+  latest.views++;
+
+  res.json(latest);
 });
 
+// 📌 목록
+app.get("/news/history", (req, res) => {
+  res.json(Object.values(reports));
+});
 
-// 상태 확인
+// 📌 상세 (압축 적용)
+app.get("/news/:id", (req, res) => {
+  const report = reports[req.params.id];
+  if (!report) return res.json({ error: "없음" });
+
+  const now = new Date();
+  const age = (now - new Date(report.createdAt)) / (1000 * 60 * 60 * 24);
+
+  let level = "full";
+  if (age > 7) level = "low";
+  else if (age > 3) level = "mid";
+
+  report.views++;
+
+  res.json({
+    ...report,
+    report: compressReport(report.report, level),
+    level
+  });
+});
+
+// 상태
 app.get("/", (req, res) => {
-  res.send("✅ AI Market Report Server Running");
+  res.send("AI Market Report Running");
 });
-
 
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
+  console.log("Server running");
 });
