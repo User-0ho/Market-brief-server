@@ -48,6 +48,22 @@ const keywords = [
   "economy","earnings","AI","semiconductor","geopolitics"
 ];
 
+// 🔥 후처리 함수 (핵심)
+function refineReport(text) {
+  if (!text) return text;
+
+  return text
+    // 방향성 표현 교정
+    .replace(/Bear\s*\+\s*(\d+)%/gi, "Bearish ($1%)")
+    .replace(/Bull\s*\+\s*(\d+)%/gi, "Bullish ($1%)")
+    .replace(/Neutral\s*\+\s*(\d+)%/gi, "Neutral ($1%)")
+
+    // 투자 문장 톤 완화
+    .replace(/매도 포지션 구축/gi, "비중 축소 고려")
+    .replace(/강한 매도/gi, "보수적 접근 필요")
+    .replace(/적극 매수/gi, "비중 확대 고려");
+}
+
 // 리포트 생성
 async function generateReport(trigger = "manual") {
   let reportText = "";
@@ -133,8 +149,7 @@ ${JSON.stringify(topKeywordHints)}
               }
             ]
           })
-        },
-        30000
+        }
       );
 
       const clusterData = await clusterRes?.json();
@@ -147,7 +162,7 @@ ${JSON.stringify(topKeywordHints)}
     // STEP3: 매크로 데이터
     const macro = await getMacroData();
 
-    // STEP4: 최종 분석 (🔥 프롬프트 최종 개선)
+    // STEP4: 최종 분석
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -167,8 +182,8 @@ ${JSON.stringify(topKeywordHints)}
 
 다음을 반드시 지켜라:
 - 방향성은 반드시 확률(%)과 함께 제시
+- 단정적인 표현 금지 (매수/매도 대신 비중 조절 표현 사용)
 - 단기 / 중기 구분 필수
-- 추측 금지
 - 데이터 기반 해석
 `
               },
@@ -188,12 +203,11 @@ ${structuredIssues}
 
 ### 2. 시장 방향성
 - Bull / Neutral / Bear 중 하나 선택
-- 반드시 확률 (%) 포함 (예: Bear 65%)
+- 반드시 확률 (%) 포함 (예: Bearish (65%))
 
 ### 3. 시간별 전망
 - 단기 (1~2주)
 - 중기 (1~3개월)
-→ 각각 반드시 작성
 
 ### 4. 리스크 시나리오
 
@@ -206,12 +220,14 @@ ${structuredIssues}
               }
             ]
           })
-        },
-        30000
+        }
       );
 
       const gptData = await gptRes?.json();
       reportText = gptData?.choices?.[0]?.message?.content;
+
+      // 🔥 후처리 적용
+      reportText = refineReport(reportText);
 
     } catch (err) {
       console.log("❌ GPT 실패:", err.message);
