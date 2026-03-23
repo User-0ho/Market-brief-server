@@ -74,7 +74,7 @@ async function generateReport(trigger = "manual") {
       filteredArticles = articles.slice(0, 15);
     }
 
-    // STEP2: 키워드 힌트 생성
+    // STEP2: 키워드 힌트
     const keywordCount = {};
     keywords.forEach(k => keywordCount[k] = 0);
 
@@ -147,7 +147,7 @@ ${JSON.stringify(topKeywordHints)}
     // STEP3: 매크로 데이터
     const macro = await getMacroData();
 
-    // STEP4: 최종 분석
+    // STEP4: 최종 분석 (🔥 프롬프트 최종 개선)
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -165,15 +165,11 @@ ${JSON.stringify(topKeywordHints)}
                 content: `
 너는 기관 투자자 수준의 애널리스트다.
 
-다음을 반드시 포함:
-- 방향성 + 확률
-- 단기 / 중기 전망
-- 리스크 시나리오
-- 반전 시나리오
-- 섹터 영향
-- 투자 전략
-
-추측 금지
+다음을 반드시 지켜라:
+- 방향성은 반드시 확률(%)과 함께 제시
+- 단기 / 중기 구분 필수
+- 추측 금지
+- 데이터 기반 해석
 `
               },
               {
@@ -186,16 +182,18 @@ ${structuredIssues}
 - 유가: ${macro.oil}
 - 금리: ${macro.rate}
 
-다음 형식으로 분석:
+다음 형식으로 작성:
 
 ### 1. 핵심 매크로 요약
 
 ### 2. 시장 방향성
-(Bull / Neutral / Bear + 확률 %)
+- Bull / Neutral / Bear 중 하나 선택
+- 반드시 확률 (%) 포함 (예: Bear 65%)
 
 ### 3. 시간별 전망
 - 단기 (1~2주)
 - 중기 (1~3개월)
+→ 각각 반드시 작성
 
 ### 4. 리스크 시나리오
 
