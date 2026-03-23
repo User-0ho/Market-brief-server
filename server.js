@@ -20,7 +20,7 @@ app.get("/news", async (req, res) => {
       });
     }
 
-    // ✅ 2. 뉴스 가져오기 (🔥 business만)
+    // ✅ 2. business 뉴스만 가져오기
     const newsUrl = `https://newsapi.org/v2/top-headlines?country=us&category=business&apiKey=${NEWS_API_KEY}`;
     const newsResponse = await fetch(newsUrl);
     const newsData = await newsResponse.json();
@@ -32,10 +32,21 @@ app.get("/news", async (req, res) => {
       });
     }
 
-    // ✅ 3. 🔥 강제 신뢰 매체 필터링 (핵심)
+    // 🔥 3. 진짜 최종 필터 (핵심)
     const trustedArticles = newsData.articles.filter(article => {
       const name = article.source.name?.toLowerCase() || "";
 
+      // ❌ 완전 제거 (잡매체)
+      if (
+        name.includes("gsmarena") ||
+        name.includes("japan times") ||
+        name.includes("sports") ||
+        name.includes("entertainment")
+      ) {
+        return false;
+      }
+
+      // ✅ 핵심 금융 매체만 허용
       return (
         name.includes("reuters") ||
         name.includes("bloomberg") ||
@@ -138,7 +149,7 @@ ${content}
   }
 });
 
-// ✅ 서버 상태 확인용
+// ✅ 서버 상태 확인
 app.get("/", (req, res) => {
   res.send("✅ Market Brief Server Running");
 });
