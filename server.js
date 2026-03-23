@@ -34,29 +34,25 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
-// STEP3: 매크로 데이터
+// 매크로 데이터
 async function getMacroData() {
   return {
-    oil: 78 + Math.random() * 5,
-    rate: 5.25,
-    market: "neutral"
+    oil: 75 + Math.random() * 10,
+    rate: 5.25
   };
 }
 
-// STEP2 키워드
+// 키워드
 const keywords = [
   "inflation","interest rate","fed","oil","recession",
   "economy","earnings","AI","semiconductor","geopolitics"
 ];
 
-// 리포트 생성
 async function generateReport(trigger = "manual") {
   let reportText = "";
 
   try {
-    // =========================
     // STEP1: 뉴스 필터링
-    // =========================
     const trustedSources = [
       "Reuters","Bloomberg","CNBC","Financial Times",
       "BBC News","The Wall Street Journal","Associated Press"
@@ -77,9 +73,7 @@ async function generateReport(trigger = "manual") {
       filteredArticles = articles.slice(0, 15);
     }
 
-    // =========================
-    // STEP2: 키워드 기반
-    // =========================
+    // STEP2: 키워드 힌트
     const keywordCount = {};
     keywords.forEach(k => keywordCount[k] = 0);
 
@@ -90,18 +84,14 @@ async function generateReport(trigger = "manual") {
       });
     });
 
-    const sortedKeywords = Object.entries(keywordCount)
+    const topKeywordHints = Object.entries(keywordCount)
       .sort((a, b) => b[1] - a[1])
-      .filter(k => k[1] > 0);
+      .slice(0, 5);
 
-    const topKeywordHints = sortedKeywords.slice(0, 5);
+    // STEP2.5: 의미 클러스터링 (업그레이드 🔥)
+    const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
-    // =========================
-    // STEP2.5: GPT 의미 클러스터링 🔥
-    // =========================
-    const rawNewsText = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
-
-    let clusteredIssues = "";
+    let structuredIssues = "";
 
     try {
       const clusterRes = await fetchWithTimeout(
@@ -118,25 +108,26 @@ async function generateReport(trigger = "manual") {
               {
                 role: "system",
                 content: `
-너는 금융 분석 AI다.
+너는 금융 리서치 애널리스트다.
 
-뉴스 제목들을 보고:
-- 의미적으로 같은 이슈를 하나로 묶어라
+뉴스를 분석하여:
+- 의미적으로 같은 이슈를 묶어라
 - 반복되는 핵심 이슈 3개만 추출
-- 단어가 달라도 같은 의미면 하나로 통합
+- 각 이슈를 다음 형식으로 작성:
+
+[이슈명]
+- 상태 (상승/하락/불확실/압력 등)
+- 원인
 `
               },
               {
                 role: "user",
                 content: `
-뉴스 목록:
-${rawNewsText}
+뉴스:
+${rawNews}
 
-힌트 키워드:
+힌트:
 ${JSON.stringify(topKeywordHints)}
-
-출력:
-핵심 이슈 3개
 `
               }
             ]
@@ -146,22 +137,18 @@ ${JSON.stringify(topKeywordHints)}
       );
 
       const clusterData = await clusterRes?.json();
-      clusteredIssues = clusterData?.choices?.[0]?.message?.content;
+      structuredIssues = clusterData?.choices?.[0]?.message?.content;
 
-      console.log("🧠 클러스터링 결과:", clusteredIssues);
+      console.log("🧠 구조화 이슈:", structuredIssues);
 
     } catch (err) {
       console.log("❌ 클러스터링 실패:", err.message);
     }
 
-    // =========================
-    // STEP3: 매크로 결합
-    // =========================
+    // STEP3: 매크로 데이터
     const macro = await getMacroData();
 
-    // =========================
-    // 최종 GPT 분석
-    // =========================
+    // 최종 분석
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -179,8 +166,8 @@ ${JSON.stringify(topKeywordHints)}
                 content: `
 너는 기관 투자자 수준 애널리스트다.
 
-- 핵심 이슈 기반 분석
-- 매크로 데이터 반드시 반영
+- 이슈의 "상태"를 기반으로 분석
+- 매크로 데이터를 반드시 해석
 - 시장 방향성 판단
 - 섹터 영향 포함
 - 추측 금지
@@ -190,7 +177,7 @@ ${JSON.stringify(topKeywordHints)}
                 role: "user",
                 content: `
 핵심 이슈:
-${clusteredIssues}
+${structuredIssues}
 
 매크로:
 - 유가: ${macro.oil}
