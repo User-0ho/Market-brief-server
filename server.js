@@ -34,6 +34,41 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
+// 🔥 GPT 요청 안정화 (핵심)
+async function fetchGPT(body, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetchWithTimeout(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify(body)
+        },
+        30000
+      );
+
+      const data = await res?.json();
+
+      console.log("🧠 GPT RAW:", JSON.stringify(data, null, 2));
+
+      if (data?.choices?.[0]?.message?.content) {
+        return data.choices[0].message.content;
+      }
+
+      console.log(`⚠️ GPT 응답 이상 → 재시도 (${i + 1})`);
+
+    } catch (err) {
+      console.log(`❌ GPT 요청 실패 (${i + 1}):`, err.message);
+    }
+  }
+
+  return null;
+}
+
 // 매크로 데이터
 async function getMacroData() {
   return {
@@ -42,7 +77,7 @@ async function getMacroData() {
   };
 }
 
-// 키워드 힌트
+// 키워드
 const keywords = [
   "inflation","interest rate","fed","oil","recession",
   "economy","earnings","AI","semiconductor","geopolitics"
@@ -102,139 +137,78 @@ async function generateReport(trigger = "manual") {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
 
-    // STEP2.5: 의미 클러스터링 (🔥 과적합 방지 버전)
+    // STEP2.5: 클러스터링
     const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
-    let structuredIssues = "";
-
-    try {
-      const clusterRes = await fetchWithTimeout(
-        "https://api.openai.com/v1/chat/completions",
+    const structuredIssues = await fetchGPT({
+      model: "gpt-4o-mini",
+      messages: [
         {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [
-              {
-                role: "system",
-                content: `
-너는 기관 금융 리서치 애널리스트다.
+          role: "system",
+          content: `
+너는 금융 리서치 애널리스트다.
 
-규칙:
-- 반복적으로 등장한 이슈를 우선적으로 선택
-- 거시경제(금리, 유가, 인플레이션 등)를 가장 중요하게 고려
-- 단일 뉴스는 가능한 배제하되, 시장 의미가 있다면 보조적으로 허용
-- 과도한 제거 금지 (균형 유지)
-
-출력:
-핵심 이슈 3개 (중요도 순)
-각 이슈는:
-- 상태
-- 원인
+- 반복된 이슈 우선
+- 매크로 중심
+- 과적합 금지
 `
-              },
-              {
-                role: "user",
-                content: `
+        },
+        {
+          role: "user",
+          content: `
 뉴스:
 ${rawNews}
 
 힌트:
 ${JSON.stringify(topKeywordHints)}
 `
-              }
-            ]
-          })
         }
-      );
+      ]
+    });
 
-      const clusterData = await clusterRes?.json();
-      structuredIssues = clusterData?.choices?.[0]?.message?.content;
-
-    } catch (err) {
-      console.log("❌ 클러스터링 실패:", err.message);
-    }
-
-    // STEP3: 매크로 데이터
+    // STEP3: 매크로
     const macro = await getMacroData();
 
     // STEP4: 최종 분석
-    try {
-      const gptRes = await fetchWithTimeout(
-        "https://api.openai.com/v1/chat/completions",
+    reportText = await fetchGPT({
+      model: "gpt-4o-mini",
+      messages: [
         {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [
-              {
-                role: "system",
-                content: `
-너는 기관 투자자 수준 애널리스트다.
+          role: "system",
+          content: `
+기관 투자자 수준 분석.
 
-규칙:
-- 핵심 매크로 중심 분석
-- 방향성 + 확률 (%)
-- 단기 / 중기 구분
-- 단정적 표현 금지
-- 균형 잡힌 해석 (과도한 확신 금지)
+- 방향성 + 확률
+- 단기/중기
+- 균형 유지
 `
-              },
-              {
-                role: "user",
-                content: `
-핵심 이슈:
+        },
+        {
+          role: "user",
+          content: `
+이슈:
 ${structuredIssues}
 
-매크로:
-- 유가: ${macro.oil}
-- 금리: ${macro.rate}
+유가: ${macro.oil}
+금리: ${macro.rate}
 
-형식:
-
-### 1. 핵심 매크로 요약
-
-### 2. 시장 방향성
-(Bullish / Neutral / Bearish + 확률 %)
-
-### 3. 시간별 전망
-- 단기 (1~2주)
-- 중기 (1~3개월)
-
-### 4. 리스크 시나리오
-
-### 5. 반전 시나리오
-
-### 6. 섹터 영향
-
-### 7. 투자 전략
+분석 작성
 `
-              }
-            ]
-          })
         }
-      );
+      ]
+    });
 
-      const gptData = await gptRes?.json();
-      reportText = gptData?.choices?.[0]?.message?.content;
-
-      reportText = refineReport(reportText);
-
-    } catch (err) {
-      console.log("❌ GPT 실패:", err.message);
-    }
-
+    // 🔥 fallback
     if (!reportText) {
-      reportText = "⚠️ 분석 실패";
+      reportText = `
+⚠️ 분석 실패 (자동 fallback)
+
+현재 API 응답이 불안정합니다.
+잠시 후 다시 시도해주세요.
+`;
     }
+
+    reportText = refineReport(reportText);
 
     const id = new Date().toISOString();
 
@@ -250,6 +224,10 @@ ${structuredIssues}
 
   } catch (err) {
     console.log("❌ 전체 실패:", err.message);
+
+    return {
+      report: "⚠️ 시스템 오류"
+    };
   }
 }
 
