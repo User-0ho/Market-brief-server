@@ -42,12 +42,13 @@ async function getMacroData() {
   };
 }
 
-// 키워드
+// 키워드 힌트
 const keywords = [
   "inflation","interest rate","fed","oil","recession",
   "economy","earnings","AI","semiconductor","geopolitics"
 ];
 
+// 리포트 생성
 async function generateReport(trigger = "manual") {
   let reportText = "";
 
@@ -73,7 +74,7 @@ async function generateReport(trigger = "manual") {
       filteredArticles = articles.slice(0, 15);
     }
 
-    // STEP2: 키워드 힌트
+    // STEP2: 키워드 힌트 생성
     const keywordCount = {};
     keywords.forEach(k => keywordCount[k] = 0);
 
@@ -88,7 +89,7 @@ async function generateReport(trigger = "manual") {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
 
-    // STEP2.5: 의미 클러스터링 (업그레이드 🔥)
+    // STEP2.5: 의미 클러스터링
     const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
     let structuredIssues = "";
@@ -116,7 +117,7 @@ async function generateReport(trigger = "manual") {
 - 각 이슈를 다음 형식으로 작성:
 
 [이슈명]
-- 상태 (상승/하락/불확실/압력 등)
+- 상태 (상승/하락/압력/불확실)
 - 원인
 `
               },
@@ -139,8 +140,6 @@ ${JSON.stringify(topKeywordHints)}
       const clusterData = await clusterRes?.json();
       structuredIssues = clusterData?.choices?.[0]?.message?.content;
 
-      console.log("🧠 구조화 이슈:", structuredIssues);
-
     } catch (err) {
       console.log("❌ 클러스터링 실패:", err.message);
     }
@@ -148,7 +147,7 @@ ${JSON.stringify(topKeywordHints)}
     // STEP3: 매크로 데이터
     const macro = await getMacroData();
 
-    // 최종 분석
+    // STEP4: 최종 분석
     try {
       const gptRes = await fetchWithTimeout(
         "https://api.openai.com/v1/chat/completions",
@@ -164,13 +163,17 @@ ${JSON.stringify(topKeywordHints)}
               {
                 role: "system",
                 content: `
-너는 기관 투자자 수준 애널리스트다.
+너는 기관 투자자 수준의 애널리스트다.
 
-- 이슈의 "상태"를 기반으로 분석
-- 매크로 데이터를 반드시 해석
-- 시장 방향성 판단
-- 섹터 영향 포함
-- 추측 금지
+다음을 반드시 포함:
+- 방향성 + 확률
+- 단기 / 중기 전망
+- 리스크 시나리오
+- 반전 시나리오
+- 섹터 영향
+- 투자 전략
+
+추측 금지
 `
               },
               {
@@ -183,12 +186,24 @@ ${structuredIssues}
 - 유가: ${macro.oil}
 - 금리: ${macro.rate}
 
-다음 분석:
+다음 형식으로 분석:
 
-1. 핵심 매크로 요약
-2. 시장 방향성 (Bull / Bear / Neutral)
-3. 섹터 영향
-4. 투자 전략
+### 1. 핵심 매크로 요약
+
+### 2. 시장 방향성
+(Bull / Neutral / Bear + 확률 %)
+
+### 3. 시간별 전망
+- 단기 (1~2주)
+- 중기 (1~3개월)
+
+### 4. 리스크 시나리오
+
+### 5. 반전 시나리오
+
+### 6. 섹터 영향
+
+### 7. 투자 전략
 `
               }
             ]
