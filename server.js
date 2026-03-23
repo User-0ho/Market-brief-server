@@ -10,7 +10,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 let reports = {};
 
-// ✅ CORS
+// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// ✅ fetch timeout
+// fetch timeout
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -34,21 +34,22 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
-// ✅ STEP2 키워드 정의
+// STEP3: 매크로 데이터
+async function getMacroData() {
+  return {
+    oil: 78 + Math.random() * 5,
+    rate: 5.25,
+    market: "neutral"
+  };
+}
+
+// STEP2 키워드
 const keywords = [
-  "inflation",
-  "interest rate",
-  "fed",
-  "oil",
-  "recession",
-  "economy",
-  "earnings",
-  "AI",
-  "semiconductor",
-  "geopolitics"
+  "inflation","interest rate","fed","oil","recession",
+  "economy","earnings","AI","semiconductor","geopolitics"
 ];
 
-// ✅ 리포트 생성
+// 리포트 생성
 async function generateReport(trigger = "manual") {
   let reportText = "";
 
@@ -57,13 +58,8 @@ async function generateReport(trigger = "manual") {
     // STEP1: 뉴스 필터링
     // =========================
     const trustedSources = [
-      "Reuters",
-      "Bloomberg",
-      "CNBC",
-      "Financial Times",
-      "BBC News",
-      "The Wall Street Journal",
-      "Associated Press"
+      "Reuters","Bloomberg","CNBC","Financial Times",
+      "BBC News","The Wall Street Journal","Associated Press"
     ];
 
     const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR interest rate OR oil OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=30&apiKey=${NEWS_API_KEY}`;
@@ -78,51 +74,93 @@ async function generateReport(trigger = "manual") {
     );
 
     if (filteredArticles.length < 5) {
-      console.log("⚠️ 신뢰 뉴스 부족 → fallback");
       filteredArticles = articles.slice(0, 15);
     }
 
     // =========================
-    // STEP2: 이슈 클러스터링
+    // STEP2: 키워드 기반
     // =========================
     const keywordCount = {};
-
-    keywords.forEach(k => (keywordCount[k] = 0));
+    keywords.forEach(k => keywordCount[k] = 0);
 
     filteredArticles.forEach(article => {
       const text = (article.title + " " + article.description).toLowerCase();
-
       keywords.forEach(keyword => {
-        if (text.includes(keyword)) {
-          keywordCount[keyword]++;
-        }
+        if (text.includes(keyword)) keywordCount[keyword]++;
       });
     });
 
-    // 빈도 정렬
     const sortedKeywords = Object.entries(keywordCount)
       .sort((a, b) => b[1] - a[1])
       .filter(k => k[1] > 0);
 
-    // 상위 3개 이슈
-    const topIssues = sortedKeywords.slice(0, 3);
-
-    console.log("🔥 핵심 이슈:", topIssues);
+    const topKeywordHints = sortedKeywords.slice(0, 5);
 
     // =========================
-    // GPT 입력 구조 변경
+    // STEP2.5: GPT 의미 클러스터링 🔥
     // =========================
-    const issueSummary = topIssues
-      .map(([k, v]) => `${k} (${v}회 언급)`)
-      .join("\n");
+    const rawNewsText = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
-    const content = filteredArticles.slice(0, 5).map(a => `
-제목: ${a.title}
-출처: ${a.source.name}
-`).join("\n\n");
+    let clusteredIssues = "";
+
+    try {
+      const clusterRes = await fetchWithTimeout(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content: `
+너는 금융 분석 AI다.
+
+뉴스 제목들을 보고:
+- 의미적으로 같은 이슈를 하나로 묶어라
+- 반복되는 핵심 이슈 3개만 추출
+- 단어가 달라도 같은 의미면 하나로 통합
+`
+              },
+              {
+                role: "user",
+                content: `
+뉴스 목록:
+${rawNewsText}
+
+힌트 키워드:
+${JSON.stringify(topKeywordHints)}
+
+출력:
+핵심 이슈 3개
+`
+              }
+            ]
+          })
+        },
+        30000
+      );
+
+      const clusterData = await clusterRes?.json();
+      clusteredIssues = clusterData?.choices?.[0]?.message?.content;
+
+      console.log("🧠 클러스터링 결과:", clusteredIssues);
+
+    } catch (err) {
+      console.log("❌ 클러스터링 실패:", err.message);
+    }
 
     // =========================
-    // GPT 분석
+    // STEP3: 매크로 결합
+    // =========================
+    const macro = await getMacroData();
+
+    // =========================
+    // 최종 GPT 분석
     // =========================
     try {
       const gptRes = await fetchWithTimeout(
@@ -139,12 +177,11 @@ async function generateReport(trigger = "manual") {
               {
                 role: "system",
                 content: `
-너는 기관 투자자 수준의 미국 주식 애널리스트다.
+너는 기관 투자자 수준 애널리스트다.
 
-반드시 아래 규칙을 따른다:
-- 반복적으로 등장한 핵심 이슈만 기반으로 분석
-- 단일 뉴스는 무시
-- 시장 방향성(Bull / Neutral / Bear)을 판단
+- 핵심 이슈 기반 분석
+- 매크로 데이터 반드시 반영
+- 시장 방향성 판단
 - 섹터 영향 포함
 - 추측 금지
 `
@@ -153,16 +190,17 @@ async function generateReport(trigger = "manual") {
                 role: "user",
                 content: `
 핵심 이슈:
-${issueSummary}
+${clusteredIssues}
 
-참고 뉴스:
-${content}
+매크로:
+- 유가: ${macro.oil}
+- 금리: ${macro.rate}
 
-다음을 분석:
+다음 분석:
 
 1. 핵심 매크로 요약
-2. 시장 방향성 (Bull / Neutral / Bear)
-3. 섹터 영향 (상승 / 하락)
+2. 시장 방향성 (Bull / Bear / Neutral)
+3. 섹터 영향
 4. 투자 전략
 `
               }
@@ -173,23 +211,19 @@ ${content}
       );
 
       const gptData = await gptRes?.json();
-
-      console.log("🧠 GPT 응답:", JSON.stringify(gptData, null, 2));
-
       reportText = gptData?.choices?.[0]?.message?.content;
 
     } catch (err) {
       console.log("❌ GPT 실패:", err.message);
     }
 
-    // fallback
     if (!reportText) {
-      reportText = "⚠️ 분석 실패 (fallback)";
+      reportText = "⚠️ 분석 실패";
     }
 
     const id = new Date().toISOString();
 
-    const newReport = {
+    reports[id] = {
       id,
       createdAt: new Date(),
       report: reportText,
@@ -197,11 +231,7 @@ ${content}
       trigger
     };
 
-    reports[id] = newReport;
-
-    console.log("✅ 리포트 생성:", id);
-
-    return newReport;
+    return reports[id];
 
   } catch (err) {
     console.log("❌ 전체 실패:", err.message);
@@ -210,14 +240,12 @@ ${content}
 
 // API
 app.get("/news/generate", async (req, res) => {
-  const result = await generateReport("manual");
-  res.json(result);
+  res.json(await generateReport("manual"));
 });
 
 app.get("/news/latest", (req, res) => {
   const keys = Object.keys(reports);
-  const latest = reports[keys[keys.length - 1]];
-  res.json(latest);
+  res.json(reports[keys[keys.length - 1]]);
 });
 
 // cron
@@ -225,5 +253,5 @@ cron.schedule("0 6 * * *", () => generateReport("morning"));
 cron.schedule("0 21 * * *", () => generateReport("evening"));
 
 app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+  console.log("🚀 Server running");
 });
