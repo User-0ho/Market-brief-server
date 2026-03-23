@@ -34,7 +34,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
-// 🔥 GPT 요청 안정화 (핵심)
+// 🔥 GPT 요청 안정화 (retry 포함)
 async function fetchGPT(body, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -47,8 +47,7 @@ async function fetchGPT(body, retries = 3) {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
           },
           body: JSON.stringify(body)
-        },
-        30000
+        }
       );
 
       const data = await res?.json();
@@ -91,6 +90,7 @@ function refineReport(text) {
     .replace(/Bear\s*\+\s*(\d+)%/gi, "Bearish ($1%)")
     .replace(/Bull\s*\+\s*(\d+)%/gi, "Bullish ($1%)")
     .replace(/Neutral\s*\+\s*(\d+)%/gi, "Neutral ($1%)")
+    .replace(/Bearish\s*\((.*?)\)\s*\+\s*(\d+)%/gi, "Bearish ($2%)")
     .replace(/매도 포지션 구축/gi, "비중 축소 고려")
     .replace(/강한 매도/gi, "보수적 접근 필요")
     .replace(/적극 매수/gi, "비중 확대 고려");
@@ -137,7 +137,7 @@ async function generateReport(trigger = "manual") {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
 
-    // STEP2.5: 클러스터링
+    // STEP2.5: 클러스터링 (🔥 Recency 포함)
     const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
 
     const structuredIssues = await fetchGPT({
@@ -146,11 +146,20 @@ async function generateReport(trigger = "manual") {
         {
           role: "system",
           content: `
-너는 금융 리서치 애널리스트다.
+너는 기관 금융 리서치 애널리스트다.
 
+규칙:
 - 반복된 이슈 우선
-- 매크로 중심
-- 과적합 금지
+- 최근 시장에서 현재 진행 중인 이슈만 반영
+- 과거/일회성 이슈 제외
+- 매크로 중심 (금리, 유가, 인플레이션 등)
+- 과적합 금지 (균형 유지)
+
+출력:
+핵심 이슈 3개 (중요도 순)
+각 이슈:
+- 상태
+- 원인
 `
         },
         {
@@ -169,18 +178,22 @@ ${JSON.stringify(topKeywordHints)}
     // STEP3: 매크로
     const macro = await getMacroData();
 
-    // STEP4: 최종 분석
+    // STEP4: 최종 분석 (🔥 형식 강제 포함)
     reportText = await fetchGPT({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content: `
-기관 투자자 수준 분석.
+너는 기관 투자자 수준 애널리스트다.
 
-- 방향성 + 확률
-- 단기/중기
-- 균형 유지
+규칙:
+- 핵심 매크로 중심 분석
+- 최근 시장 상황 반영
+- 방향성은 반드시 "Bearish (65%)" 형식
+- 단기 / 중기 구분
+- 단정적 표현 금지
+- 균형 잡힌 해석
 `
         },
         {
@@ -192,18 +205,34 @@ ${structuredIssues}
 유가: ${macro.oil}
 금리: ${macro.rate}
 
-분석 작성
+다음 형식으로 작성:
+
+### 1. 핵심 매크로 요약
+
+### 2. 시장 방향성
+
+### 3. 시간별 전망
+- 단기 (1~2주)
+- 중기 (1~3개월)
+
+### 4. 리스크 시나리오
+
+### 5. 반전 시나리오
+
+### 6. 섹터 영향
+
+### 7. 투자 전략
 `
         }
       ]
     });
 
-    // 🔥 fallback
+    // fallback
     if (!reportText) {
       reportText = `
-⚠️ 분석 실패 (자동 fallback)
+⚠️ 분석 실패 (fallback)
 
-현재 API 응답이 불안정합니다.
+API 응답이 불안정합니다.
 잠시 후 다시 시도해주세요.
 `;
     }
