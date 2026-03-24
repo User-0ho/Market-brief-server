@@ -1,5 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
+import fs from "fs";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,6 +10,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FRED_API_KEY = process.env.FRED_API_KEY;
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const TWELVEDATA_KEY = process.env.TWELVEDATA_API_KEY;
+
+const DB_FILE = "./backtest.json";
+
+// ================= DB =================
+function loadDB() {
+  try {
+    return JSON.parse(fs.readFileSync(DB_FILE));
+  } catch {
+    return [];
+  }
+}
+
+function saveDB(data) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+}
 
 // ================= fetch =================
 async function fetchWithTimeout(url, options = {}, timeout = 10000) {
@@ -42,25 +58,12 @@ async function fetchGPT(messages) {
       }
     );
 
-    if (!res) {
-      console.log("❌ GPT 요청 실패");
-      return null;
-    }
+    if (!res) return null;
 
-    const text = await res.text();
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      console.log("❌ GPT JSON 파싱 실패:", text);
-      return null;
-    }
-
+    const data = await res.json();
     return data?.choices?.[0]?.message?.content || null;
 
-  } catch (err) {
-    console.log("❌ GPT ERROR:", err.message);
+  } catch {
     return null;
   }
 }
@@ -69,222 +72,118 @@ async function fetchGPT(messages) {
 async function getSPYChange() {
   try {
     let change1d = 0;
-    let change5d = 0;
-    let change20d = 0;
 
-    // Finnhub
-    try {
-      const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
-      const res = await fetchWithTimeout(url);
-      const data = res ? await res.json() : null;
-
-      if (data?.c && data?.pc) {
-        change1d = ((data.c - data.pc) / data.pc) * 100;
-      }
-    } catch {}
-
-    // TwelveData
-    try {
-      const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=25&apikey=${TWELVEDATA_KEY}`;
-      const res = await fetchWithTimeout(url);
-      const data = res ? await res.json() : null;
-
-      if (data?.values?.length >= 21) {
-        const prices = data.values.map(v => parseFloat(v.close));
-
-        const latest = prices[0];
-        const prev5 = prices[5];
-        const prev20 = prices[20];
-
-        change5d = ((latest - prev5) / prev5) * 100;
-        change20d = ((latest - prev20) / prev20) * 100;
-      }
-    } catch {}
-
-    if (change5d === 0) change5d = change1d;
-    if (change20d === 0) change20d = change5d;
-
-    return { change1d, change5d, change20d };
-
-  } catch {
-    return { change1d: 0.5, change5d: -0.5, change20d: 1.2 };
-  }
-}
-
-// ================= 금리 =================
-async function getFedRate() {
-  try {
-    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=2`;
-
+    const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
     const res = await fetchWithTimeout(url);
     const data = res ? await res.json() : null;
 
-    const latest = parseFloat(data.observations[0].value);
-    const prev = parseFloat(data.observations[1].value);
-
-    return { value: latest, change: latest - prev };
-
-  } catch {
-    return { value: 5.25, change: 0 };
-  }
-}
-
-// ================= 유가 =================
-async function getOilPrice() {
-  try {
-    const url = `https://api.twelvedata.com/price?symbol=OIL&apikey=${TWELVEDATA_KEY}`;
-    const res = await fetchWithTimeout(url);
-    const data = res ? await res.json() : null;
-
-    if (data?.price) {
-      return { value: parseFloat(data.price), change: 0 };
+    if (data?.c && data?.pc) {
+      change1d = ((data.c - data.pc) / data.pc) * 100;
     }
 
-    return { value: 75, change: 0 };
+    return { change1d };
 
   } catch {
-    return { value: 75, change: 0 };
+    return { change1d: 0 };
   }
 }
 
 // ================= 뉴스 =================
 async function getNews() {
-  const query = `
-("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession)
-AND (market OR stocks)
-`;
+  const query = `("S&P 500" OR "Federal Reserve" OR inflation OR CPI)`;
 
-  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=20&apiKey=${NEWS_API_KEY}`;
+  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&pageSize=10&apiKey=${NEWS_API_KEY}`;
 
   const res = await fetchWithTimeout(url);
   const data = res ? await res.json() : null;
 
-  const trusted = {
-    "Reuters": 1.2,
-    "Bloomberg": 1.2,
-    "CNBC": 1.0,
-    "Financial Times": 1.2
-  };
-
-  return (data?.articles || [])
-    .filter(a =>
-      trusted[a.source.name] &&
-      a.description &&
-      a.title.length > 20
-    )
-    .map(a => ({
-      text: `${a.title}. ${a.description}`,
-      weight: trusted[a.source.name]
-    }))
-    .slice(0, 15);
+  return (data?.articles || []).map(a => a.title).slice(0, 5);
 }
 
-// ================= sentiment (🔥 안정화) =================
+// ================= sentiment =================
 async function getSentiment(articles) {
-  try {
-    let total = 0;
-    let count = 0;
+  let total = 0;
 
-    const topArticles = articles.slice(0, 5); // 🔥 핵심
+  for (const text of articles) {
+    const result = await fetchGPT([
+      { role: "system", content: "Return number between -2 and 2 only" },
+      { role: "user", content: text }
+    ]);
 
-    for (const article of topArticles) {
-      const result = await fetchGPT([
-        {
-          role: "system",
-          content: "Return ONLY a number between -2 and 2"
-        },
-        {
-          role: "user",
-          content: article.text
-        }
-      ]);
-
-      console.log("GPT RESULT:", result);
-
-      if (!result) continue;
-
-      const match = result.match(/-?\d+(\.\d+)?/);
-      const score = match ? parseFloat(match[0]) : NaN;
-
-      if (!isNaN(score)) {
-        total += score * article.weight;
-        count += article.weight;
-      }
-    }
-
-    // 🔥 fallback 추가
-    if (count === 0) {
-      console.log("⚠️ sentiment fallback");
-      return -0.3;
-    }
-
-    return total / count;
-
-  } catch {
-    return -0.3;
+    const match = result?.match(/-?\d+/);
+    if (match) total += parseFloat(match[0]);
   }
-}
 
-// ================= score =================
-function calculateScore(macro, oil, spy, sentiment) {
-  let score = 0;
-
-  if (macro.change > 0.1) score -= 2;
-
-  if (spy.change1d > 1) score += 1;
-  if (spy.change1d < -1) score -= 1;
-
-  if (spy.change5d > 2) score += 2;
-  if (spy.change5d < -2) score -= 2;
-
-  if (spy.change20d > 5) score += 2;
-  if (spy.change20d < -5) score -= 2;
-
-  score += sentiment;
-
-  return score;
+  return articles.length ? total / articles.length : 0;
 }
 
 // ================= signal =================
-function sigmoid(x) {
-  return 1 / (1 + Math.exp(-x));
+function getSignal(score) {
+  if (score > 0.5) return "Bullish";
+  if (score < -0.5) return "Bearish";
+  return "Neutral";
 }
 
-function scoreToSignal(score) {
-  const prob = Math.round(sigmoid(score) * 100);
-
-  if (score > 1) return { direction: "Bullish", prob };
-  if (score < -1) return { direction: "Bearish", prob };
-  return { direction: "Neutral", prob };
-}
-
-// ================= main =================
-async function generateReport() {
-  const articles = await getNews();
-  const sentiment = await getSentiment(articles);
-
-  const macro = await getFedRate();
-  const oil = await getOilPrice();
+// ================= generate =================
+async function generateSignal() {
+  const news = await getNews();
+  const sentiment = await getSentiment(news);
   const spy = await getSPYChange();
 
-  const score = calculateScore(macro, oil, spy, sentiment);
-  const signal = scoreToSignal(score);
+  const score = sentiment + spy.change1d * 0.2;
+  const signal = getSignal(score);
 
-  return {
-    signal,
-    spy,
-    oil,
-    macro,
-    sentiment,
-    score
-  };
+  return { signal, score, spy };
 }
 
-// ================= API =================
-app.get("/news/generate", async (req, res) => {
-  res.json(await generateReport());
+// ================= 저장 =================
+app.get("/save", async (req, res) => {
+  const db = loadDB();
+
+  const result = await generateSignal();
+
+  db.push({
+    date: new Date().toISOString(),
+    signal: result.signal,
+    score: result.score,
+    spy: result.spy.change1d
+  });
+
+  saveDB(db);
+
+  res.json(result);
+});
+
+// ================= 분석 =================
+app.get("/analyze", (req, res) => {
+  const db = loadDB();
+
+  let win = 0;
+  let total = 0;
+  let profit = 0;
+
+  for (let i = 0; i < db.length - 1; i++) {
+    const today = db[i];
+    const next = db[i + 1];
+
+    if (today.signal === "Bullish" && next.spy > 0) {
+      win++;
+      profit += next.spy;
+    } else if (today.signal === "Bearish" && next.spy < 0) {
+      win++;
+      profit += Math.abs(next.spy);
+    }
+
+    total++;
+  }
+
+  res.json({
+    total,
+    winRate: total ? (win / total) * 100 : 0,
+    profit
+  });
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.5 FINAL STABLE running");
+  console.log("🚀 R3 Backtest Server running");
 });
