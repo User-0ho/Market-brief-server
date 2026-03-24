@@ -24,7 +24,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   }
 }
 
-// ================= GPT (🔥 안정화 핵심) =================
+// ================= GPT =================
 async function fetchGPT(messages) {
   try {
     const res = await fetchWithTimeout(
@@ -43,7 +43,7 @@ async function fetchGPT(messages) {
     );
 
     if (!res) {
-      console.log("❌ GPT 요청 실패 (no response)");
+      console.log("❌ GPT 요청 실패");
       return null;
     }
 
@@ -57,12 +57,7 @@ async function fetchGPT(messages) {
       return null;
     }
 
-    if (!data?.choices?.[0]?.message?.content) {
-      console.log("❌ GPT 응답 이상:", data);
-      return null;
-    }
-
-    return data.choices[0].message.content;
+    return data?.choices?.[0]?.message?.content || null;
 
   } catch (err) {
     console.log("❌ GPT ERROR:", err.message);
@@ -77,7 +72,7 @@ async function getSPYChange() {
     let change5d = 0;
     let change20d = 0;
 
-    // Finnhub → 1일
+    // Finnhub
     try {
       const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
       const res = await fetchWithTimeout(url);
@@ -88,7 +83,7 @@ async function getSPYChange() {
       }
     } catch {}
 
-    // TwelveData → 5일 / 20일
+    // TwelveData
     try {
       const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=25&apikey=${TWELVEDATA_KEY}`;
       const res = await fetchWithTimeout(url);
@@ -184,21 +179,19 @@ AND (market OR stocks)
     .slice(0, 15);
 }
 
-// ================= sentiment =================
+// ================= sentiment (🔥 안정화) =================
 async function getSentiment(articles) {
   try {
     let total = 0;
     let count = 0;
 
-    for (const article of articles) {
+    const topArticles = articles.slice(0, 5); // 🔥 핵심
+
+    for (const article of topArticles) {
       const result = await fetchGPT([
         {
           role: "system",
-          content: `
-You must return ONLY a number.
--2 to 2 only.
-No explanation.
-`
+          content: "Return ONLY a number between -2 and 2"
         },
         {
           role: "user",
@@ -219,12 +212,16 @@ No explanation.
       }
     }
 
-    if (count === 0) return 0;
+    // 🔥 fallback 추가
+    if (count === 0) {
+      console.log("⚠️ sentiment fallback");
+      return -0.3;
+    }
 
     return total / count;
 
   } catch {
-    return 0;
+    return -0.3;
   }
 }
 
@@ -289,5 +286,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.5 FINAL (ULTIMATE) running");
+  console.log("🚀 R2.5 FINAL STABLE running");
 });
