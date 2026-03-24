@@ -65,7 +65,7 @@ async function fetchGPT(body, retries = 3) {
   return null;
 }
 
-// ==================== 매크로 ====================
+// ==================== 매크로 (캐싱) ====================
 let macroCache = null;
 let lastMacroFetch = 0;
 
@@ -124,19 +124,63 @@ async function getMacroData() {
   }
 }
 
-// ==================== SPY 가격 ====================
+// ==================== SPY ====================
 async function getSPY() {
   const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
 
   const res = await fetchWithTimeout(url);
   const data = await res?.json();
 
-  const price = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
-
-  return price || null;
+  return data?.quoteResponse?.result?.[0]?.regularMarketPrice || null;
 }
 
-// ==================== 뉴스 중복 제거 ====================
+// ==================== 뉴스 필터 ====================
+function isTrustedSource(name = "") {
+  const lower = name.toLowerCase();
+
+  return (
+    lower.includes("reuters") ||
+    lower.includes("bloomberg") ||
+    lower.includes("cnbc") ||
+    lower.includes("financial times") ||
+    lower.includes("ft") ||
+    lower.includes("bbc") ||
+    lower.includes("wall street journal") ||
+    lower.includes("wsj") ||
+    lower.includes("associated press") ||
+    lower.includes("ap")
+  );
+}
+
+// ==================== source 가중치 ====================
+function getSourceWeight(name = "") {
+  const lower = name.toLowerCase();
+
+  if (lower.includes("reuters")) return 1.0;
+  if (lower.includes("bloomberg")) return 1.0;
+  if (lower.includes("wsj")) return 0.95;
+  if (lower.includes("financial times")) return 0.95;
+  if (lower.includes("cnbc")) return 0.9;
+  if (lower.includes("bbc")) return 0.9;
+
+  return 0.7;
+}
+
+// ==================== 이벤트 중요도 ====================
+function getEventImpactScore(text) {
+  let score = 0;
+
+  if (text.includes("fed") || text.includes("interest rate")) score += 2;
+  if (text.includes("inflation") || text.includes("cpi")) score += 2;
+  if (text.includes("recession")) score += 2;
+  if (text.includes("war") || text.includes("geopolitics")) score += 2;
+  if (text.includes("earnings")) score += 1;
+  if (text.includes("ai") || text.includes("semiconductor")) score += 1;
+
+  return score;
+}
+
+// ==================== 중복 제거 ====================
 function deduplicateArticles(articles) {
   const seen = new Set();
 
@@ -148,33 +192,46 @@ function deduplicateArticles(articles) {
   });
 }
 
-// ==================== 뉴스 sentiment ====================
+// ==================== sentiment ====================
 function calculateSentiment(articles) {
-  let score = 0;
+  let totalScore = 0;
+  let totalWeight = 0;
 
   articles.forEach(a => {
     const text = (a.title + " " + a.description).toLowerCase();
+    const weight = getSourceWeight(a.source.name);
+    const impact = getEventImpactScore(text);
 
-    if (text.includes("inflation") || text.includes("rate hike")) score -= 1;
-    if (text.includes("recession") || text.includes("war")) score -= 2;
-    if (text.includes("growth") || text.includes("strong earnings")) score += 1;
-    if (text.includes("AI boom") || text.includes("rally")) score += 2;
+    let score = 0;
+
+    if (text.includes("inflation")) score -= 1;
+    if (text.includes("rate hike")) score -= 2;
+    if (text.includes("recession")) score -= 2;
+    if (text.includes("war")) score -= 2;
+
+    if (text.includes("growth")) score += 1;
+    if (text.includes("strong earnings")) score += 2;
+    if (text.includes("rally")) score += 2;
+    if (text.includes("ai boom")) score += 2;
+
+    const weighted = score * weight * (1 + impact * 0.3);
+
+    totalScore += weighted;
+    totalWeight += weight;
   });
 
-  return score;
+  return totalWeight > 0 ? totalScore / totalWeight : 0;
 }
 
 // ==================== 점수 ====================
-function calculateTotalScore(macro, sentimentScore) {
+function calculateTotalScore(macro, sentiment) {
   let score = 0;
 
-  // macro
   if (macro.rate.value > 5) score -= 1;
   if (macro.rate.trend === "up") score -= 1;
   if (macro.oil.change > 1) score -= 1;
 
-  // sentiment
-  score += sentimentScore * 0.5;
+  score += sentiment * 0.5;
 
   return score;
 }
@@ -188,11 +245,6 @@ function scoreToSignal(score) {
 // ==================== 리포트 ====================
 async function generateReport(trigger = "manual") {
   try {
-    const trustedSources = [
-      "Reuters","Bloomberg","CNBC","Financial Times",
-      "BBC News","The Wall Street Journal","Associated Press"
-    ];
-
     const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=30&apiKey=${NEWS_API_KEY}`;
 
     const newsRes = await fetchWithTimeout(newsUrl);
@@ -201,13 +253,13 @@ async function generateReport(trigger = "manual") {
     let articles = newsData?.articles || [];
 
     let filteredArticles = articles.filter(a =>
-      trustedSources.includes(a.source.name)
+      isTrustedSource(a.source.name)
     );
 
     filteredArticles = deduplicateArticles(filteredArticles);
 
-    if (filteredArticles.length < 5) {
-      filteredArticles = articles.slice(0, 15);
+    if (filteredArticles.length === 0) {
+      return { report: "⚠️ 신뢰 뉴스 부족" };
     }
 
     const rawNews = filteredArticles
@@ -225,12 +277,12 @@ async function generateReport(trigger = "manual") {
 
     const macro = await getMacroData();
     const spy = await getSPY();
-    const sentimentScore = calculateSentiment(filteredArticles);
+    const sentiment = calculateSentiment(filteredArticles);
 
-    const totalScore = calculateTotalScore(macro, sentimentScore);
-    const signal = scoreToSignal(totalScore);
+    const score = calculateTotalScore(macro, sentiment);
+    const signal = scoreToSignal(score);
 
-    const reportText = await fetchGPT({
+    const report = await fetchGPT({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -247,9 +299,9 @@ SPY: ${spy}
 금리: ${macro.rate.value} (${macro.rate.trend})
 유가: ${macro.oil.value}
 
-뉴스 sentiment 점수: ${sentimentScore}
+sentiment: ${sentiment}
 
-최종 신호:
+최종:
 ${signal.direction} (${signal.prob}%)
 
 분석 작성
@@ -263,11 +315,11 @@ ${signal.direction} (${signal.prob}%)
     reports[id] = {
       id,
       createdAt: new Date(),
-      report: reportText,
+      report,
       signal,
       spy,
-      sentimentScore,
-      totalScore,
+      sentiment,
+      score,
       trigger
     };
 
