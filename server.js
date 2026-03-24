@@ -1,6 +1,7 @@
 import express from "express";
 import fetch from "node-fetch";
 import cron from "node-cron";
+import yahooFinance from "yahoo-finance2";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -85,7 +86,7 @@ async function getFedRate() {
   }
 }
 
-// ==================== OIL (Alpha Vantage) ====================
+// ==================== OIL (Alpha Vantage 정상화) ====================
 async function getOilPrice() {
   try {
     const url = `https://www.alphavantage.co/query?function=WTI&apikey=${ALPHA_VANTAGE_KEY}`;
@@ -94,6 +95,7 @@ async function getOilPrice() {
     const data = res ? await safeJsonParse(res) : null;
 
     if (!data?.data || data.data.length < 2) {
+      console.log("⚠️ Alpha Vantage fallback");
       return { value: 75, change: 0 };
     }
 
@@ -105,52 +107,50 @@ async function getOilPrice() {
       change: ((latest - prev) / prev) * 100
     };
 
-  } catch {
+  } catch (err) {
+    console.log("❌ Oil error:", err.message);
     return { value: 75, change: 0 };
   }
 }
 
-// ==================== SPY (R1.5 핵심) ====================
+// ==================== SPY (R2 완성) ====================
 async function getSPYChange() {
   try {
+    // ===== Stooq (기반) =====
     const stooqUrl = "https://stooq.com/q/d/l/?s=spy.us&i=d";
     const res = await fetchWithTimeout(stooqUrl);
 
-    if (!res) return { change1d: 0, change5d: 0, change20d: 0 };
+    if (!res) throw new Error("stooq fail");
 
     const text = await res.text();
-    const lines = text.split("\n").slice(1).filter(Boolean);
 
-    if (lines.length < 25) {
-      return { change1d: 0, change5d: 0, change20d: 0 };
-    }
+    const lines = text.split("\n").slice(1).filter(l => l.trim());
 
-    const data = lines.map(line => {
-      const [date, open, high, low, close] = line.split(",");
-      return { close: parseFloat(close) };
-    });
+    const prices = lines
+      .map(line => {
+        const parts = line.split(",");
+        const close = parseFloat(parts[4]);
+        return isNaN(close) ? null : close;
+      })
+      .filter(v => v !== null);
 
-    const prev1 = data[data.length - 2].close;
-    const prev5 = data[data.length - 6].close;
-    const prev20 = data[data.length - 21].close;
-    const latestStooq = data[data.length - 1].close;
+    if (prices.length < 25) throw new Error("not enough data");
 
-    let currentPrice = latestStooq;
+    const prev1 = prices[prices.length - 2];
+    const prev5 = prices[prices.length - 6];
+    const prev20 = prices[prices.length - 21];
 
-    // Yahoo 보정
+    let currentPrice = prices[prices.length - 1];
+
+    // ===== yahoo-finance2 (핵심) =====
     try {
-      const yahooUrl = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY";
-      const yahooRes = await fetchWithTimeout(yahooUrl);
-
-      if (yahooRes) {
-        const txt = await yahooRes.text();
-        if (txt.includes("quoteResponse")) {
-          const json = JSON.parse(txt);
-          const price = json?.quoteResponse?.result?.[0]?.regularMarketPrice;
-          if (price) currentPrice = price;
-        }
+      const quote = await yahooFinance.quote("SPY");
+      if (quote?.regularMarketPrice) {
+        currentPrice = quote.regularMarketPrice;
       }
-    } catch {}
+    } catch {
+      console.log("⚠️ yahoo fallback");
+    }
 
     return {
       change1d: ((currentPrice - prev1) / prev1) * 100,
@@ -158,12 +158,32 @@ async function getSPYChange() {
       change20d: ((currentPrice - prev20) / prev20) * 100
     };
 
-  } catch {
+  } catch (err) {
+    console.log("❌ SPY error:", err.message);
     return { change1d: 0, change5d: 0, change20d: 0 };
   }
 }
 
-// ==================== GPT sentiment ====================
+// ==================== 뉴스 (핵심 개선 🔥) ====================
+async function getNews() {
+  const query = `
+("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession OR economy)
+AND (market OR stocks)
+`;
+
+  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=20&apiKey=${NEWS_API_KEY}`;
+
+  const res = await fetchWithTimeout(url);
+  const data = res ? await safeJsonParse(res) : null;
+
+  const trusted = ["Reuters", "Bloomberg", "CNBC", "Financial Times"];
+
+  return (data?.articles || [])
+    .filter(a => trusted.includes(a.source.name))
+    .slice(0, 10);
+}
+
+// ==================== sentiment ====================
 async function getSentiment(text) {
   const result = await fetchGPT([
     { role: "system", content: "뉴스 감정을 -2~2 숫자로만 반환" },
@@ -211,13 +231,7 @@ function scoreToSignal(score) {
 // ==================== MAIN ====================
 async function generateReport() {
   try {
-    const newsRes = await fetchWithTimeout(
-      `https://newsapi.org/v2/everything?q=stock&apiKey=${NEWS_API_KEY}`
-    );
-
-    const newsData = newsRes ? await safeJsonParse(newsRes) : null;
-    const articles = newsData?.articles?.slice(0, 5) || [];
-
+    const articles = await getNews();
     const newsText = articles.map(a => a.title).join("\n");
 
     const sentiment = await getSentiment(newsText);
@@ -269,5 +283,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R1.5 Server running");
+  console.log("🚀 R2 Server running");
 });
