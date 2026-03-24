@@ -10,10 +10,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FRED_API_KEY = process.env.FRED_API_KEY;
 const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
 
-let reports = {};
-
 // ==================== fetch ====================
-async function fetchWithTimeout(url, options = {}, timeout = 30000) {
+async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
@@ -37,7 +35,7 @@ async function safeJsonParse(res) {
 }
 
 // ==================== GPT ====================
-async function fetchGPT(body) {
+async function fetchGPT(messages) {
   try {
     const res = await fetchWithTimeout(
       "https://api.openai.com/v1/chat/completions",
@@ -47,7 +45,10 @@ async function fetchGPT(body) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages
+        })
       }
     );
 
@@ -109,80 +110,92 @@ async function getOilPrice() {
   }
 }
 
-// ==================== SPY 변화율 ====================
-let spyHistory = [];
-
+// ==================== SPY (R1.5 핵심) ====================
 async function getSPYChange() {
   try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
-    const res = await fetchWithTimeout(url);
+    const stooqUrl = "https://stooq.com/q/d/l/?s=spy.us&i=d";
+    const res = await fetchWithTimeout(stooqUrl);
 
-    if (!res) return { change1d: 0, change5d: 0 };
+    if (!res) return { change1d: 0, change5d: 0, change20d: 0 };
 
     const text = await res.text();
+    const lines = text.split("\n").slice(1).filter(Boolean);
 
-    if (!text.includes("quoteResponse")) {
-      return { change1d: 0, change5d: 0 };
+    if (lines.length < 25) {
+      return { change1d: 0, change5d: 0, change20d: 0 };
     }
 
-    const data = JSON.parse(text);
-    const price = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+    const data = lines.map(line => {
+      const [date, open, high, low, close] = line.split(",");
+      return { close: parseFloat(close) };
+    });
 
-    if (!price) return { change1d: 0, change5d: 0 };
+    const prev1 = data[data.length - 2].close;
+    const prev5 = data[data.length - 6].close;
+    const prev20 = data[data.length - 21].close;
+    const latestStooq = data[data.length - 1].close;
 
-    spyHistory.push(price);
-    if (spyHistory.length > 10) spyHistory.shift();
+    let currentPrice = latestStooq;
 
-    const change1d = spyHistory.length > 1
-      ? ((price - spyHistory[spyHistory.length - 2]) / price) * 100
-      : 0;
+    // Yahoo 보정
+    try {
+      const yahooUrl = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY";
+      const yahooRes = await fetchWithTimeout(yahooUrl);
 
-    const change5d = spyHistory.length > 5
-      ? ((price - spyHistory[0]) / price) * 100
-      : 0;
+      if (yahooRes) {
+        const txt = await yahooRes.text();
+        if (txt.includes("quoteResponse")) {
+          const json = JSON.parse(txt);
+          const price = json?.quoteResponse?.result?.[0]?.regularMarketPrice;
+          if (price) currentPrice = price;
+        }
+      }
+    } catch {}
 
-    return { change1d, change5d };
+    return {
+      change1d: ((currentPrice - prev1) / prev1) * 100,
+      change5d: ((currentPrice - prev5) / prev5) * 100,
+      change20d: ((currentPrice - prev20) / prev20) * 100
+    };
 
   } catch {
-    return { change1d: 0, change5d: 0 };
+    return { change1d: 0, change5d: 0, change20d: 0 };
   }
 }
 
-// ==================== GPT Sentiment ====================
-async function getGPTSentiment(text) {
-  const result = await fetchGPT({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: "뉴스 감정을 -2~+2 숫자로만 평가"
-      },
-      {
-        role: "user",
-        content: text
-      }
-    ]
-  });
+// ==================== GPT sentiment ====================
+async function getSentiment(text) {
+  const result = await fetchGPT([
+    { role: "system", content: "뉴스 감정을 -2~2 숫자로만 반환" },
+    { role: "user", content: text }
+  ]);
 
   const num = parseFloat(result);
   return isNaN(num) ? 0 : num;
 }
 
-// ==================== 점수 ====================
+// ==================== SCORE ====================
 function calculateScore(macro, oil, spy, sentiment) {
   let score = 0;
 
   if (macro.change > 0.1) score -= 2;
   if (oil.change > 2) score -= 1;
+
+  if (spy.change1d > 1) score += 1;
+  if (spy.change1d < -1) score -= 1;
+
   if (spy.change5d > 2) score += 2;
   if (spy.change5d < -2) score -= 2;
+
+  if (spy.change20d > 5) score += 2;
+  if (spy.change20d < -5) score -= 2;
 
   score += sentiment;
 
   return score;
 }
 
-// ==================== 확률 ====================
+// ==================== SIGNAL ====================
 function sigmoid(x) {
   return 1 / (1 + Math.exp(-x));
 }
@@ -195,19 +208,19 @@ function scoreToSignal(score) {
   return { direction: "Neutral", prob };
 }
 
-// ==================== 리포트 ====================
+// ==================== MAIN ====================
 async function generateReport() {
   try {
-    const newsUrl = `https://newsapi.org/v2/everything?q=stock&apiKey=${NEWS_API_KEY}`;
+    const newsRes = await fetchWithTimeout(
+      `https://newsapi.org/v2/everything?q=stock&apiKey=${NEWS_API_KEY}`
+    );
 
-    const newsRes = await fetchWithTimeout(newsUrl);
     const newsData = newsRes ? await safeJsonParse(newsRes) : null;
-
     const articles = newsData?.articles?.slice(0, 5) || [];
 
     const newsText = articles.map(a => a.title).join("\n");
 
-    const sentiment = await getGPTSentiment(newsText);
+    const sentiment = await getSentiment(newsText);
 
     const macro = await getFedRate();
     const oil = await getOilPrice();
@@ -216,29 +229,24 @@ async function generateReport() {
     const score = calculateScore(macro, oil, spy, sentiment);
     const signal = scoreToSignal(score);
 
-    const report = await fetchGPT({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: "정량 데이터를 기반으로 투자 분석"
-        },
-        {
-          role: "user",
-          content: `
-SPY 변화율: ${JSON.stringify(spy)}
+    const report = await fetchGPT([
+      {
+        role: "system",
+        content: "정량 데이터 기반 투자 분석 작성"
+      },
+      {
+        role: "user",
+        content: `
+SPY: ${JSON.stringify(spy)}
 금리 변화: ${macro.change}
 유가 변화: ${oil.change}
 sentiment: ${sentiment}
 
-신호:
+결론:
 ${signal.direction} (${signal.prob}%)
-
-분석 작성
 `
-        }
-      ]
-    });
+      }
+    ]);
 
     return {
       report,
@@ -261,5 +269,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 V3 Server running");
+  console.log("🚀 R1.5 Server running");
 });
