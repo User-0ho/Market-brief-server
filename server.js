@@ -11,12 +11,12 @@ const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const TWELVEDATA_KEY = process.env.TWELVEDATA_API_KEY;
 
 // ================= fetch =================
-async function fetchWithTimeout(url, timeout = 10000) {
+async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...options, signal: controller.signal });
   } catch {
     return null;
   } finally {
@@ -24,24 +24,48 @@ async function fetchWithTimeout(url, timeout = 10000) {
   }
 }
 
-// ================= GPT =================
+// ================= GPT (🔥 안정화 핵심) =================
 async function fetchGPT(messages) {
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages
-      })
-    });
+    const res = await fetchWithTimeout(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages
+        })
+      }
+    );
 
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content || null;
-  } catch {
+    if (!res) {
+      console.log("❌ GPT 요청 실패 (no response)");
+      return null;
+    }
+
+    const text = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.log("❌ GPT JSON 파싱 실패:", text);
+      return null;
+    }
+
+    if (!data?.choices?.[0]?.message?.content) {
+      console.log("❌ GPT 응답 이상:", data);
+      return null;
+    }
+
+    return data.choices[0].message.content;
+
+  } catch (err) {
+    console.log("❌ GPT ERROR:", err.message);
     return null;
   }
 }
@@ -160,7 +184,7 @@ AND (market OR stocks)
     .slice(0, 15);
 }
 
-// ================= sentiment (🔥 FIX 적용) =================
+// ================= sentiment =================
 async function getSentiment(articles) {
   try {
     let total = 0;
@@ -172,14 +196,8 @@ async function getSentiment(articles) {
           role: "system",
           content: `
 You must return ONLY a number.
-No text, no explanation.
-
-Range:
--2 = very negative
--1 = negative
-0 = neutral
-1 = positive
-2 = very positive
+-2 to 2 only.
+No explanation.
 `
         },
         {
@@ -188,10 +206,11 @@ Range:
         }
       ]);
 
+      console.log("GPT RESULT:", result);
+
       if (!result) continue;
 
-      // 🔥 숫자만 추출 (핵심)
-      const match = result.match(/-?\\d+(\\.\\d+)?/);
+      const match = result.match(/-?\d+(\.\d+)?/);
       const score = match ? parseFloat(match[0]) : NaN;
 
       if (!isNaN(score)) {
@@ -270,5 +289,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.5 FINAL Server running");
+  console.log("🚀 R2.5 FINAL (ULTIMATE) running");
 });
