@@ -7,10 +7,12 @@ const PORT = process.env.PORT || 3000;
 
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const FRED_API_KEY = process.env.FRED_API_KEY;
+const TE_API_KEY = process.env.TE_API_KEY;
 
 let reports = {};
 
-// CORS
+// ==================== CORS ====================
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
@@ -19,7 +21,7 @@ app.use((req, res, next) => {
 });
 app.options("*", (req, res) => res.sendStatus(200));
 
-// fetch timeout
+// ==================== fetch ====================
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -34,7 +36,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
-// 🔥 GPT 요청 안정화 (retry 포함)
+// ==================== GPT ====================
 async function fetchGPT(body, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -52,62 +54,146 @@ async function fetchGPT(body, retries = 3) {
 
       const data = await res?.json();
 
-      console.log("🧠 GPT RAW:", JSON.stringify(data, null, 2));
-
       if (data?.choices?.[0]?.message?.content) {
         return data.choices[0].message.content;
       }
 
-      console.log(`⚠️ GPT 응답 이상 → 재시도 (${i + 1})`);
-
     } catch (err) {
-      console.log(`❌ GPT 요청 실패 (${i + 1}):`, err.message);
+      console.log(`❌ GPT 실패 (${i + 1})`, err.message);
     }
   }
-
   return null;
 }
 
-// 매크로 데이터
-async function getMacroData() {
+// ==================== 매크로 ====================
+let macroCache = null;
+let lastMacroFetch = 0;
+
+async function getFedRate() {
+  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=2`;
+
+  const res = await fetchWithTimeout(url);
+  const data = await res?.json();
+
+  const latest = parseFloat(data.observations[0].value);
+  const prev = parseFloat(data.observations[1].value);
+
   return {
-    oil: 75 + Math.random() * 10,
-    rate: 5.25
+    value: latest,
+    trend: latest > prev ? "up" : latest < prev ? "down" : "flat"
   };
 }
 
-// 키워드
-const keywords = [
-  "inflation","interest rate","fed","oil","recession",
-  "economy","earnings","AI","semiconductor","geopolitics"
-];
+async function getOilPrice() {
+  const url = `https://api.tradingeconomics.com/commodities?c=${TE_API_KEY}`;
 
-// 후처리
-function refineReport(text) {
-  if (!text) return text;
+  const res = await fetchWithTimeout(url);
+  const data = await res?.json();
 
-  return text
-    .replace(/Bear\s*\+\s*(\d+)%/gi, "Bearish ($1%)")
-    .replace(/Bull\s*\+\s*(\d+)%/gi, "Bullish ($1%)")
-    .replace(/Neutral\s*\+\s*(\d+)%/gi, "Neutral ($1%)")
-    .replace(/Bearish\s*\((.*?)\)\s*\+\s*(\d+)%/gi, "Bearish ($2%)")
-    .replace(/매도 포지션 구축/gi, "비중 축소 고려")
-    .replace(/강한 매도/gi, "보수적 접근 필요")
-    .replace(/적극 매수/gi, "비중 확대 고려");
+  const oil = data?.find(d => d.Name === "Crude Oil WTI");
+
+  return {
+    value: oil?.Price || 75,
+    change: oil?.Change || 0
+  };
 }
 
-// 리포트 생성
-async function generateReport(trigger = "manual") {
-  let reportText = "";
+async function getMacroData() {
+  if (macroCache && Date.now() - lastMacroFetch < 10 * 60 * 1000) {
+    return macroCache;
+  }
 
   try {
-    // STEP1: 뉴스 필터링
+    const [rate, oil] = await Promise.all([
+      getFedRate(),
+      getOilPrice()
+    ]);
+
+    const macro = { rate, oil };
+
+    macroCache = macro;
+    lastMacroFetch = Date.now();
+
+    return macro;
+
+  } catch (err) {
+    return {
+      rate: { value: 5.25, trend: "flat" },
+      oil: { value: 75, change: 0 }
+    };
+  }
+}
+
+// ==================== SPY 가격 ====================
+async function getSPY() {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
+
+  const res = await fetchWithTimeout(url);
+  const data = await res?.json();
+
+  const price = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+
+  return price || null;
+}
+
+// ==================== 뉴스 중복 제거 ====================
+function deduplicateArticles(articles) {
+  const seen = new Set();
+
+  return articles.filter(a => {
+    const key = (a.title || "").toLowerCase().slice(0, 100);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ==================== 뉴스 sentiment ====================
+function calculateSentiment(articles) {
+  let score = 0;
+
+  articles.forEach(a => {
+    const text = (a.title + " " + a.description).toLowerCase();
+
+    if (text.includes("inflation") || text.includes("rate hike")) score -= 1;
+    if (text.includes("recession") || text.includes("war")) score -= 2;
+    if (text.includes("growth") || text.includes("strong earnings")) score += 1;
+    if (text.includes("AI boom") || text.includes("rally")) score += 2;
+  });
+
+  return score;
+}
+
+// ==================== 점수 ====================
+function calculateTotalScore(macro, sentimentScore) {
+  let score = 0;
+
+  // macro
+  if (macro.rate.value > 5) score -= 1;
+  if (macro.rate.trend === "up") score -= 1;
+  if (macro.oil.change > 1) score -= 1;
+
+  // sentiment
+  score += sentimentScore * 0.5;
+
+  return score;
+}
+
+function scoreToSignal(score) {
+  if (score <= -2) return { direction: "Bearish", prob: 65 };
+  if (score >= 2) return { direction: "Bullish", prob: 65 };
+  return { direction: "Neutral", prob: 55 };
+}
+
+// ==================== 리포트 ====================
+async function generateReport(trigger = "manual") {
+  try {
     const trustedSources = [
       "Reuters","Bloomberg","CNBC","Financial Times",
       "BBC News","The Wall Street Journal","Associated Press"
     ];
 
-    const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR interest rate OR oil OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=30&apiKey=${NEWS_API_KEY}`;
+    const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=30&apiKey=${NEWS_API_KEY}`;
 
     const newsRes = await fetchWithTimeout(newsUrl);
     const newsData = await newsRes?.json();
@@ -118,83 +204,38 @@ async function generateReport(trigger = "manual") {
       trustedSources.includes(a.source.name)
     );
 
+    filteredArticles = deduplicateArticles(filteredArticles);
+
     if (filteredArticles.length < 5) {
       filteredArticles = articles.slice(0, 15);
     }
 
-    // STEP2: 키워드 힌트
-    const keywordCount = {};
-    keywords.forEach(k => keywordCount[k] = 0);
-
-    filteredArticles.forEach(article => {
-      const text = (article.title + " " + article.description).toLowerCase();
-      keywords.forEach(keyword => {
-        if (text.includes(keyword)) keywordCount[keyword]++;
-      });
-    });
-
-    const topKeywordHints = Object.entries(keywordCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
-
-    // STEP2.5: 클러스터링 (🔥 Recency 포함)
-    const rawNews = filteredArticles.slice(0, 10).map(a => a.title).join("\n");
+    const rawNews = filteredArticles
+      .slice(0, 10)
+      .map(a => a.title + " " + a.description)
+      .join("\n");
 
     const structuredIssues = await fetchGPT({
       model: "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content: `
-너는 기관 금융 리서치 애널리스트다.
-
-규칙:
-- 반복된 이슈 우선
-- 최근 시장에서 현재 진행 중인 이슈만 반영
-- 과거/일회성 이슈 제외
-- 매크로 중심 (금리, 유가, 인플레이션 등)
-- 과적합 금지 (균형 유지)
-
-출력:
-핵심 이슈 3개 (중요도 순)
-각 이슈:
-- 상태
-- 원인
-`
-        },
-        {
-          role: "user",
-          content: `
-뉴스:
-${rawNews}
-
-힌트:
-${JSON.stringify(topKeywordHints)}
-`
-        }
+        { role: "system", content: "핵심 매크로 이슈 3개 요약" },
+        { role: "user", content: rawNews }
       ]
     });
 
-    // STEP3: 매크로
     const macro = await getMacroData();
+    const spy = await getSPY();
+    const sentimentScore = calculateSentiment(filteredArticles);
 
-    // STEP4: 최종 분석 (🔥 형식 강제 포함)
-    reportText = await fetchGPT({
+    const totalScore = calculateTotalScore(macro, sentimentScore);
+    const signal = scoreToSignal(totalScore);
+
+    const reportText = await fetchGPT({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `
-너는 기관 투자자 수준 애널리스트다.
-
-규칙:
-- 핵심 매크로 중심 분석
-- 최근 시장 상황 반영
-- 방향성은 반드시 "Bearish (65%)" 형식
-- 단기 / 중기 구분
-- 단정적 표현 금지
-- 균형 잡힌 해석
-`
+          content: "정량 신호를 변경하지 말고 해석만 수행"
         },
         {
           role: "user",
@@ -202,42 +243,20 @@ ${JSON.stringify(topKeywordHints)}
 이슈:
 ${structuredIssues}
 
-유가: ${macro.oil}
-금리: ${macro.rate}
+SPY: ${spy}
+금리: ${macro.rate.value} (${macro.rate.trend})
+유가: ${macro.oil.value}
 
-다음 형식으로 작성:
+뉴스 sentiment 점수: ${sentimentScore}
 
-### 1. 핵심 매크로 요약
+최종 신호:
+${signal.direction} (${signal.prob}%)
 
-### 2. 시장 방향성
-
-### 3. 시간별 전망
-- 단기 (1~2주)
-- 중기 (1~3개월)
-
-### 4. 리스크 시나리오
-
-### 5. 반전 시나리오
-
-### 6. 섹터 영향
-
-### 7. 투자 전략
+분석 작성
 `
         }
       ]
     });
-
-    // fallback
-    if (!reportText) {
-      reportText = `
-⚠️ 분석 실패 (fallback)
-
-API 응답이 불안정합니다.
-잠시 후 다시 시도해주세요.
-`;
-    }
-
-    reportText = refineReport(reportText);
 
     const id = new Date().toISOString();
 
@@ -245,24 +264,24 @@ API 응답이 불안정합니다.
       id,
       createdAt: new Date(),
       report: reportText,
-      views: 0,
+      signal,
+      spy,
+      sentimentScore,
+      totalScore,
       trigger
     };
 
     return reports[id];
 
   } catch (err) {
-    console.log("❌ 전체 실패:", err.message);
-
-    return {
-      report: "⚠️ 시스템 오류"
-    };
+    console.log(err);
+    return { report: "⚠️ 오류" };
   }
 }
 
-// API
+// ==================== API ====================
 app.get("/news/generate", async (req, res) => {
-  res.json(await generateReport("manual"));
+  res.json(await generateReport());
 });
 
 app.get("/news/latest", (req, res) => {
@@ -270,7 +289,7 @@ app.get("/news/latest", (req, res) => {
   res.json(reports[keys[keys.length - 1]]);
 });
 
-// cron
+// ==================== cron ====================
 cron.schedule("0 6 * * *", () => generateReport("morning"));
 cron.schedule("0 21 * * *", () => generateReport("evening"));
 
