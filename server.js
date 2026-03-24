@@ -46,8 +46,7 @@ async function safeJsonParse(res) {
       console.log("❌ JSON 파싱 실패:", text.slice(0, 200));
       return null;
     }
-  } catch (err) {
-    console.log("❌ 응답 읽기 실패:", err.message);
+  } catch {
     return null;
   }
 }
@@ -75,13 +74,13 @@ async function fetchGPT(body, retries = 3) {
       }
 
     } catch (err) {
-      console.log(`❌ GPT 실패 (${i + 1})`, err.message);
+      console.log("❌ GPT 오류:", err.message);
     }
   }
   return null;
 }
 
-// ==================== 매크로 ====================
+// ==================== FRED ====================
 async function getFedRate() {
   try {
     if (!FRED_API_KEY) {
@@ -110,6 +109,7 @@ async function getFedRate() {
   }
 }
 
+// ==================== Oil ====================
 async function getOilPrice() {
   try {
     if (!TE_API_KEY) {
@@ -136,33 +136,48 @@ async function getOilPrice() {
   }
 }
 
-// ==================== SPY (강화 버전) ====================
+// ==================== SPY 안정화 ====================
+let cachedSPY = 0;
+let lastSPYFetch = 0;
+
 async function getSPY() {
   try {
+    if (Date.now() - lastSPYFetch < 60000 && cachedSPY !== 0) {
+      return cachedSPY;
+    }
+
     const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
 
     const res = await fetchWithTimeout(url);
 
-    if (!res) return 0;
+    if (!res) return cachedSPY || 0;
 
     const text = await res.text();
 
     if (!text.includes("quoteResponse")) {
-      console.log("❌ SPY API 비정상:", text.slice(0, 100));
-      return 0;
+      console.log("❌ SPY 비정상 응답");
+      return cachedSPY || 0;
     }
 
     const data = JSON.parse(text);
 
-    return data?.quoteResponse?.result?.[0]?.regularMarketPrice || 0;
+    const price = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+
+    if (price) {
+      cachedSPY = price;
+      lastSPYFetch = Date.now();
+      return price;
+    }
+
+    return cachedSPY || 0;
 
   } catch (err) {
     console.log("❌ SPY 오류:", err.message);
-    return 0;
+    return cachedSPY || 0;
   }
 }
 
-// ==================== 뉴스 필터 ====================
+// ==================== 뉴스 ====================
 function isTrustedSource(name = "") {
   const lower = name.toLowerCase();
   return (
@@ -184,31 +199,16 @@ function deduplicateArticles(articles) {
   });
 }
 
-// ==================== sentiment (강화) ====================
+// ==================== sentiment ====================
 function calculateSentiment(articles) {
   let score = 0;
 
   articles.forEach(a => {
     const text = ((a.title || "") + " " + (a.description || "")).toLowerCase();
 
-    if (
-      text.includes("inflation") ||
-      text.includes("rate") ||
-      text.includes("fed")
-    ) score -= 1;
-
-    if (
-      text.includes("recession") ||
-      text.includes("war") ||
-      text.includes("conflict")
-    ) score -= 2;
-
-    if (
-      text.includes("growth") ||
-      text.includes("rally") ||
-      text.includes("strong") ||
-      text.includes("bull")
-    ) score += 1;
+    if (text.includes("inflation") || text.includes("rate") || text.includes("fed")) score -= 1;
+    if (text.includes("recession") || text.includes("war")) score -= 2;
+    if (text.includes("growth") || text.includes("rally") || text.includes("strong")) score += 1;
   });
 
   return score;
@@ -218,11 +218,15 @@ function calculateSentiment(articles) {
 function calculateTotalScore(macro, sentiment) {
   let score = 0;
 
-  if (macro.rate.value > 5) score -= 1;
-  if (macro.rate.trend === "up") score -= 1;
-  if (macro.oil.change > 1) score -= 1;
+  const rate = macro?.rate?.value ?? 5.25;
+  const trend = macro?.rate?.trend ?? "flat";
+  const oilChange = macro?.oil?.change ?? 0;
 
-  score += sentiment * 0.5;
+  if (rate > 5) score -= 1;
+  if (trend === "up") score -= 1;
+  if (oilChange > 1) score -= 1;
+
+  score += (sentiment || 0) * 0.5;
 
   return score;
 }
@@ -249,7 +253,7 @@ async function generateReport(trigger = "manual") {
 
     filteredArticles = deduplicateArticles(filteredArticles);
 
-    console.log("📰 사용 뉴스 개수:", filteredArticles.length);
+    console.log("📰 뉴스 개수:", filteredArticles.length);
 
     if (filteredArticles.length === 0) {
       return { report: "⚠️ 신뢰 뉴스 부족" };
@@ -268,12 +272,14 @@ async function generateReport(trigger = "manual") {
       ]
     });
 
-    const macro = await getFedRate();
+    const rate = await getFedRate();
     const oil = await getOilPrice();
     const spy = await getSPY();
     const sentiment = calculateSentiment(filteredArticles);
 
-    const score = calculateTotalScore({ ...macro, oil }, sentiment);
+    const macro = { rate, oil };
+
+    const score = calculateTotalScore(macro, sentiment);
     const signal = scoreToSignal(score);
 
     const report = await fetchGPT({
@@ -287,7 +293,7 @@ async function generateReport(trigger = "manual") {
           role: "user",
           content: `
 SPY: ${spy}
-금리: ${macro.value}
+금리: ${rate.value}
 유가: ${oil.value}
 sentiment: ${sentiment}
 
