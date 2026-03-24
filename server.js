@@ -46,14 +46,14 @@ async function fetchGPT(messages) {
   }
 }
 
-// ================= SPY (🔥 R2.3 핵심) =================
+// ================= SPY =================
 async function getSPYChange() {
   try {
     let change1d = 0;
     let change5d = 0;
     let change20d = 0;
 
-    // ===== 1. Finnhub → 1일 =====
+    // Finnhub → 1일
     try {
       const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
       const res = await fetchWithTimeout(url);
@@ -62,11 +62,9 @@ async function getSPYChange() {
       if (data?.c && data?.pc) {
         change1d = ((data.c - data.pc) / data.pc) * 100;
       }
-    } catch {
-      console.log("⚠️ Finnhub 실패");
-    }
+    } catch {}
 
-    // ===== 2. TwelveData → 5일 / 20일 =====
+    // TwelveData → 5일 / 20일
     try {
       const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=25&apikey=${TWELVEDATA_KEY}`;
       const res = await fetchWithTimeout(url);
@@ -82,26 +80,15 @@ async function getSPYChange() {
         change5d = ((latest - prev5) / prev5) * 100;
         change20d = ((latest - prev20) / prev20) * 100;
       }
-    } catch {
-      console.log("⚠️ TwelveData 실패");
-    }
+    } catch {}
 
-    // ===== fallback 보정 =====
     if (change5d === 0) change5d = change1d;
     if (change20d === 0) change20d = change5d;
 
-    return {
-      change1d,
-      change5d,
-      change20d
-    };
+    return { change1d, change5d, change20d };
 
   } catch {
-    return {
-      change1d: 0.5,
-      change5d: -0.5,
-      change20d: 1.2
-    };
+    return { change1d: 0.5, change5d: -0.5, change20d: 1.2 };
   }
 }
 
@@ -116,10 +103,7 @@ async function getFedRate() {
     const latest = parseFloat(data.observations[0].value);
     const prev = parseFloat(data.observations[1].value);
 
-    return {
-      value: latest,
-      change: latest - prev
-    };
+    return { value: latest, change: latest - prev };
 
   } catch {
     return { value: 5.25, change: 0 };
@@ -134,10 +118,7 @@ async function getOilPrice() {
     const data = res ? await res.json() : null;
 
     if (data?.price) {
-      return {
-        value: parseFloat(data.price),
-        change: 0
-      };
+      return { value: parseFloat(data.price), change: 0 };
     }
 
     return { value: 75, change: 0 };
@@ -147,33 +128,71 @@ async function getOilPrice() {
   }
 }
 
-// ================= 뉴스 =================
+// ================= 뉴스 (🔥 개선) =================
 async function getNews() {
   const query = `
 ("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession)
 AND (market OR stocks)
 `;
 
-  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=10&apiKey=${NEWS_API_KEY}`;
+  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=20&apiKey=${NEWS_API_KEY}`;
 
   const res = await fetchWithTimeout(url);
   const data = res ? await res.json() : null;
 
-  const trusted = ["Reuters", "Bloomberg", "CNBC"];
+  const trusted = {
+    "Reuters": 1.2,
+    "Bloomberg": 1.2,
+    "CNBC": 1.0,
+    "Financial Times": 1.2
+  };
 
   return (data?.articles || [])
-    .filter(a => trusted.includes(a.source.name));
+    .filter(a =>
+      trusted[a.source.name] &&
+      a.description &&
+      a.title.length > 20
+    )
+    .map(a => ({
+      text: `${a.title}. ${a.description}`,
+      weight: trusted[a.source.name]
+    }))
+    .slice(0, 15);
 }
 
-// ================= sentiment =================
-async function getSentiment(text) {
-  const result = await fetchGPT([
-    { role: "system", content: "Return number between -2 and 2 only" },
-    { role: "user", content: text }
-  ]);
+// ================= sentiment (🔥 핵심) =================
+async function getSentiment(articles) {
+  try {
+    let total = 0;
+    let count = 0;
 
-  const num = parseFloat(result);
-  return isNaN(num) ? 0 : num;
+    for (const article of articles) {
+      const result = await fetchGPT([
+        {
+          role: "system",
+          content: "Return only a number between -2 and 2"
+        },
+        {
+          role: "user",
+          content: article.text
+        }
+      ]);
+
+      const score = parseFloat(result);
+
+      if (!isNaN(score)) {
+        total += score * article.weight;
+        count += article.weight;
+      }
+    }
+
+    if (count === 0) return 0;
+
+    return total / count;
+
+  } catch {
+    return 0;
+  }
 }
 
 // ================= score =================
@@ -212,9 +231,8 @@ function scoreToSignal(score) {
 // ================= main =================
 async function generateReport() {
   const articles = await getNews();
-  const newsText = articles.map(a => a.title).join("\n");
+  const sentiment = await getSentiment(articles);
 
-  const sentiment = await getSentiment(newsText);
   const macro = await getFedRate();
   const oil = await getOilPrice();
   const spy = await getSPYChange();
@@ -238,5 +256,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.3 Server running");
+  console.log("🚀 R2.5 Server running");
 });
