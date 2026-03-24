@@ -27,76 +27,80 @@ async function fetchWithTimeout(url, timeout = 10000) {
 // ================= GPT =================
 async function fetchGPT(messages) {
   try {
-    const res = await fetchWithTimeout(
-      "https://api.openai.com/v1/chat/completions"
-    );
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages
+      })
+    });
 
     const data = await res.json();
-
     return data?.choices?.[0]?.message?.content || null;
   } catch {
     return null;
   }
 }
 
-// ================= SPY (🔥 R2.2 핵심) =================
+// ================= SPY (🔥 R2.3 핵심) =================
 async function getSPYChange() {
   try {
-    // ===== 1. Finnhub =====
+    let change1d = 0;
+    let change5d = 0;
+    let change20d = 0;
+
+    // ===== 1. Finnhub → 1일 =====
     try {
       const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
       const res = await fetchWithTimeout(url);
       const data = res ? await res.json() : null;
 
       if (data?.c && data?.pc) {
-        const change = ((data.c - data.pc) / data.pc) * 100;
-
-        return {
-          change1d: change,
-          change5d: change,
-          change20d: change
-        };
+        change1d = ((data.c - data.pc) / data.pc) * 100;
       }
     } catch {
       console.log("⚠️ Finnhub 실패");
     }
 
-    // ===== 2. TwelveData =====
+    // ===== 2. TwelveData → 5일 / 20일 =====
     try {
-      const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=20&apikey=${TWELVEDATA_KEY}`;
+      const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=25&apikey=${TWELVEDATA_KEY}`;
       const res = await fetchWithTimeout(url);
       const data = res ? await res.json() : null;
 
-      if (data?.values?.length >= 6) {
+      if (data?.values?.length >= 21) {
         const prices = data.values.map(v => parseFloat(v.close));
 
         const latest = prices[0];
         const prev5 = prices[5];
+        const prev20 = prices[20];
 
-        const change = ((latest - prev5) / prev5) * 100;
-
-        return {
-          change1d: change,
-          change5d: change,
-          change20d: change
-        };
+        change5d = ((latest - prev5) / prev5) * 100;
+        change20d = ((latest - prev20) / prev20) * 100;
       }
     } catch {
       console.log("⚠️ TwelveData 실패");
     }
 
-    // ===== fallback =====
+    // ===== fallback 보정 =====
+    if (change5d === 0) change5d = change1d;
+    if (change20d === 0) change20d = change5d;
+
     return {
-      change1d: 0.5,
-      change5d: -0.8,
-      change20d: 1.5
+      change1d,
+      change5d,
+      change20d
     };
 
   } catch {
     return {
       change1d: 0.5,
-      change5d: -0.8,
-      change20d: 1.5
+      change5d: -0.5,
+      change20d: 1.2
     };
   }
 }
@@ -177,8 +181,15 @@ function calculateScore(macro, oil, spy, sentiment) {
   let score = 0;
 
   if (macro.change > 0.1) score -= 2;
+
   if (spy.change1d > 1) score += 1;
   if (spy.change1d < -1) score -= 1;
+
+  if (spy.change5d > 2) score += 2;
+  if (spy.change5d < -2) score -= 2;
+
+  if (spy.change20d > 5) score += 2;
+  if (spy.change20d < -5) score -= 2;
 
   score += sentiment;
 
@@ -227,5 +238,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.2 Server running");
+  console.log("🚀 R2.3 Server running");
 });
