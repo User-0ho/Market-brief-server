@@ -1,6 +1,5 @@
 import express from "express";
 import fetch from "node-fetch";
-import yahooFinance from "yahoo-finance2";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,15 +7,16 @@ const PORT = process.env.PORT || 3000;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FRED_API_KEY = process.env.FRED_API_KEY;
-const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
+const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
+const TWELVEDATA_KEY = process.env.TWELVEDATA_API_KEY;
 
 // ================= fetch =================
-async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+async function fetchWithTimeout(url, timeout = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { signal: controller.signal });
   } catch {
     return null;
   } finally {
@@ -24,52 +24,90 @@ async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   }
 }
 
-// ================= JSON =================
-async function safeJsonParse(res) {
-  try {
-    const text = await res.text();
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
 // ================= GPT =================
 async function fetchGPT(messages) {
   try {
     const res = await fetchWithTimeout(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages
-        })
-      }
+      "https://api.openai.com/v1/chat/completions"
     );
 
-    const data = res ? await safeJsonParse(res) : null;
+    const data = await res.json();
+
     return data?.choices?.[0]?.message?.content || null;
   } catch {
     return null;
   }
 }
 
+// ================= SPY (🔥 R2.2 핵심) =================
+async function getSPYChange() {
+  try {
+    // ===== 1. Finnhub =====
+    try {
+      const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`;
+      const res = await fetchWithTimeout(url);
+      const data = res ? await res.json() : null;
+
+      if (data?.c && data?.pc) {
+        const change = ((data.c - data.pc) / data.pc) * 100;
+
+        return {
+          change1d: change,
+          change5d: change,
+          change20d: change
+        };
+      }
+    } catch {
+      console.log("⚠️ Finnhub 실패");
+    }
+
+    // ===== 2. TwelveData =====
+    try {
+      const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&outputsize=20&apikey=${TWELVEDATA_KEY}`;
+      const res = await fetchWithTimeout(url);
+      const data = res ? await res.json() : null;
+
+      if (data?.values?.length >= 6) {
+        const prices = data.values.map(v => parseFloat(v.close));
+
+        const latest = prices[0];
+        const prev5 = prices[5];
+
+        const change = ((latest - prev5) / prev5) * 100;
+
+        return {
+          change1d: change,
+          change5d: change,
+          change20d: change
+        };
+      }
+    } catch {
+      console.log("⚠️ TwelveData 실패");
+    }
+
+    // ===== fallback =====
+    return {
+      change1d: 0.5,
+      change5d: -0.8,
+      change20d: 1.5
+    };
+
+  } catch {
+    return {
+      change1d: 0.5,
+      change5d: -0.8,
+      change20d: 1.5
+    };
+  }
+}
+
 // ================= 금리 =================
 async function getFedRate() {
   try {
-    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=5`;
+    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=2`;
 
     const res = await fetchWithTimeout(url);
-    const data = res ? await safeJsonParse(res) : null;
-
-    if (!data?.observations || data.observations.length < 2) {
-      return { value: 5.25, change: 0 };
-    }
+    const data = res ? await res.json() : null;
 
     const latest = parseFloat(data.observations[0].value);
     const prev = parseFloat(data.observations[1].value);
@@ -87,119 +125,46 @@ async function getFedRate() {
 // ================= 유가 =================
 async function getOilPrice() {
   try {
-    const url = `https://www.alphavantage.co/query?function=WTI&apikey=${ALPHA_VANTAGE_KEY}`;
-
+    const url = `https://api.twelvedata.com/price?symbol=OIL&apikey=${TWELVEDATA_KEY}`;
     const res = await fetchWithTimeout(url);
-    const data = res ? await safeJsonParse(res) : null;
+    const data = res ? await res.json() : null;
 
-    if (!data?.data || data.data.length < 2) {
-      return { value: 75, change: 0 };
+    if (data?.price) {
+      return {
+        value: parseFloat(data.price),
+        change: 0
+      };
     }
 
-    const latest = parseFloat(data.data[0].value);
-    const prev = parseFloat(data.data[1].value);
-
-    return {
-      value: latest,
-      change: ((latest - prev) / prev) * 100
-    };
+    return { value: 75, change: 0 };
 
   } catch {
     return { value: 75, change: 0 };
   }
 }
 
-// ================= SPY (🔥 완전 안정화) =================
-async function getSPYChange() {
-  try {
-    // ===== 1. yahoo-finance2 (우선)
-    try {
-      const quote = await yahooFinance.quote("SPY");
-
-      if (quote?.regularMarketPrice && quote?.regularMarketPreviousClose) {
-        const current = quote.regularMarketPrice;
-        const prev = quote.regularMarketPreviousClose;
-
-        const change1d = ((current - prev) / prev) * 100;
-
-        return {
-          change1d,
-          change5d: change1d,
-          change20d: change1d
-        };
-      }
-    } catch (err) {
-      console.log("⚠️ yahoo 실패");
-    }
-
-    // ===== 2. Stooq (fallback)
-    const url = "https://stooq.com/q/d/l/?s=spy.us&i=d";
-    const res = await fetchWithTimeout(url);
-
-    if (!res) throw new Error("stooq fail");
-
-    const text = await res.text();
-
-    const rows = text.split("\n").slice(1).filter(r => r.trim());
-
-    const closes = [];
-
-    for (const row of rows) {
-      const parts = row.split(",");
-      const close = Number(parts[4]);
-      if (!isNaN(close) && close > 0) {
-        closes.push(close);
-      }
-    }
-
-    if (closes.length < 25) throw new Error("data 부족");
-
-    const latest = closes[closes.length - 1];
-    const prev1 = closes[closes.length - 2];
-    const prev5 = closes[closes.length - 6];
-    const prev20 = closes[closes.length - 21];
-
-    return {
-      change1d: ((latest - prev1) / prev1) * 100,
-      change5d: ((latest - prev5) / prev5) * 100,
-      change20d: ((latest - prev20) / prev20) * 100
-    };
-
-  } catch (err) {
-    console.log("❌ SPY 완전 실패");
-
-    // 마지막 fallback (0 방지)
-    return {
-      change1d: 0.3,
-      change5d: -0.5,
-      change20d: 1.2
-    };
-  }
-}
-
 // ================= 뉴스 =================
 async function getNews() {
   const query = `
-("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession OR economy)
+("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession)
 AND (market OR stocks)
 `;
 
-  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=20&apiKey=${NEWS_API_KEY}`;
+  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=en&sortBy=publishedAt&pageSize=10&apiKey=${NEWS_API_KEY}`;
 
   const res = await fetchWithTimeout(url);
-  const data = res ? await safeJsonParse(res) : null;
+  const data = res ? await res.json() : null;
 
-  const trusted = ["Reuters", "Bloomberg", "CNBC", "Financial Times"];
+  const trusted = ["Reuters", "Bloomberg", "CNBC"];
 
   return (data?.articles || [])
-    .filter(a => trusted.includes(a.source.name))
-    .slice(0, 10);
+    .filter(a => trusted.includes(a.source.name));
 }
 
 // ================= sentiment =================
 async function getSentiment(text) {
   const result = await fetchGPT([
-    { role: "system", content: "뉴스 감정을 -2~2 숫자로만 반환" },
+    { role: "system", content: "Return number between -2 and 2 only" },
     { role: "user", content: text }
   ]);
 
@@ -212,16 +177,8 @@ function calculateScore(macro, oil, spy, sentiment) {
   let score = 0;
 
   if (macro.change > 0.1) score -= 2;
-  if (oil.change > 2) score -= 1;
-
   if (spy.change1d > 1) score += 1;
   if (spy.change1d < -1) score -= 1;
-
-  if (spy.change5d > 2) score += 2;
-  if (spy.change5d < -2) score -= 2;
-
-  if (spy.change20d > 5) score += 2;
-  if (spy.change20d < -5) score -= 2;
 
   score += sentiment;
 
@@ -243,51 +200,25 @@ function scoreToSignal(score) {
 
 // ================= main =================
 async function generateReport() {
-  try {
-    const articles = await getNews();
-    const newsText = articles.map(a => a.title).join("\n");
+  const articles = await getNews();
+  const newsText = articles.map(a => a.title).join("\n");
 
-    const sentiment = await getSentiment(newsText);
+  const sentiment = await getSentiment(newsText);
+  const macro = await getFedRate();
+  const oil = await getOilPrice();
+  const spy = await getSPYChange();
 
-    const macro = await getFedRate();
-    const oil = await getOilPrice();
-    const spy = await getSPYChange();
+  const score = calculateScore(macro, oil, spy, sentiment);
+  const signal = scoreToSignal(score);
 
-    const score = calculateScore(macro, oil, spy, sentiment);
-    const signal = scoreToSignal(score);
-
-    const report = await fetchGPT([
-      {
-        role: "system",
-        content: "정량 데이터 기반 투자 분석 작성"
-      },
-      {
-        role: "user",
-        content: `
-SPY: ${JSON.stringify(spy)}
-금리 변화: ${macro.change}
-유가 변화: ${oil.change}
-sentiment: ${sentiment}
-
-결론:
-${signal.direction} (${signal.prob}%)
-`
-      }
-    ]);
-
-    return {
-      report,
-      signal,
-      spy,
-      oil,
-      macro,
-      sentiment,
-      score
-    };
-
-  } catch {
-    return { report: "오류" };
-  }
+  return {
+    signal,
+    spy,
+    oil,
+    macro,
+    sentiment,
+    score
+  };
 }
 
 // ================= API =================
@@ -296,5 +227,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2 FINAL Server running");
+  console.log("🚀 R2.2 Server running");
 });
