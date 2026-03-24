@@ -36,6 +36,22 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
+// ==================== JSON 안전 파싱 ====================
+async function safeJsonParse(res) {
+  try {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      console.log("❌ JSON 파싱 실패:", text.slice(0, 200));
+      return null;
+    }
+  } catch (err) {
+    console.log("❌ 응답 읽기 실패:", err.message);
+    return null;
+  }
+}
+
 // ==================== GPT ====================
 async function fetchGPT(body, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -52,7 +68,7 @@ async function fetchGPT(body, retries = 3) {
         }
       );
 
-      const data = await res?.json();
+      const data = res ? await safeJsonParse(res) : null;
 
       if (data?.choices?.[0]?.message?.content) {
         return data.choices[0].message.content;
@@ -65,37 +81,67 @@ async function fetchGPT(body, retries = 3) {
   return null;
 }
 
-// ==================== 매크로 (캐싱) ====================
+// ==================== 매크로 ====================
 let macroCache = null;
 let lastMacroFetch = 0;
 
 async function getFedRate() {
-  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=2`;
+  try {
+    if (!FRED_API_KEY) {
+      console.log("⚠️ FRED_API_KEY 없음 → fallback");
+      return { value: 5.25, trend: "flat" };
+    }
 
-  const res = await fetchWithTimeout(url);
-  const data = await res?.json();
+    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=2`;
 
-  const latest = parseFloat(data.observations[0].value);
-  const prev = parseFloat(data.observations[1].value);
+    const res = await fetchWithTimeout(url);
+    const data = res ? await safeJsonParse(res) : null;
 
-  return {
-    value: latest,
-    trend: latest > prev ? "up" : latest < prev ? "down" : "flat"
-  };
+    if (!data?.observations || data.observations.length < 2) {
+      return { value: 5.25, trend: "flat" };
+    }
+
+    const latest = parseFloat(data.observations[0].value);
+    const prev = parseFloat(data.observations[1].value);
+
+    return {
+      value: latest,
+      trend: latest > prev ? "up" : latest < prev ? "down" : "flat"
+    };
+
+  } catch (err) {
+    console.log("❌ 금리 오류:", err.message);
+    return { value: 5.25, trend: "flat" };
+  }
 }
 
 async function getOilPrice() {
-  const url = `https://api.tradingeconomics.com/commodities?c=${TE_API_KEY}`;
+  try {
+    if (!TE_API_KEY) {
+      console.log("⚠️ TE_API_KEY 없음 → fallback");
+      return { value: 75, change: 0 };
+    }
 
-  const res = await fetchWithTimeout(url);
-  const data = await res?.json();
+    const url = `https://api.tradingeconomics.com/commodities?c=${TE_API_KEY}`;
 
-  const oil = data?.find(d => d.Name === "Crude Oil WTI");
+    const res = await fetchWithTimeout(url);
+    const data = res ? await safeJsonParse(res) : null;
 
-  return {
-    value: oil?.Price || 75,
-    change: oil?.Change || 0
-  };
+    if (!Array.isArray(data)) {
+      return { value: 75, change: 0 };
+    }
+
+    const oil = data.find(d => d.Name === "Crude Oil WTI");
+
+    return {
+      value: oil?.Price || 75,
+      change: oil?.Change || 0
+    };
+
+  } catch (err) {
+    console.log("❌ 유가 오류:", err.message);
+    return { value: 75, change: 0 };
+  }
 }
 
 async function getMacroData() {
@@ -126,12 +172,17 @@ async function getMacroData() {
 
 // ==================== SPY ====================
 async function getSPY() {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
+  try {
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=SPY`;
 
-  const res = await fetchWithTimeout(url);
-  const data = await res?.json();
+    const res = await fetchWithTimeout(url);
+    const data = res ? await safeJsonParse(res) : null;
 
-  return data?.quoteResponse?.result?.[0]?.regularMarketPrice || null;
+    return data?.quoteResponse?.result?.[0]?.regularMarketPrice || 0;
+
+  } catch {
+    return 0;
+  }
 }
 
 // ==================== 뉴스 필터 ====================
@@ -143,47 +194,14 @@ function isTrustedSource(name = "") {
     lower.includes("bloomberg") ||
     lower.includes("cnbc") ||
     lower.includes("financial times") ||
-    lower.includes("ft") ||
     lower.includes("bbc") ||
-    lower.includes("wall street journal") ||
     lower.includes("wsj") ||
-    lower.includes("associated press") ||
-    lower.includes("ap")
+    lower.includes("associated press")
   );
 }
 
-// ==================== source 가중치 ====================
-function getSourceWeight(name = "") {
-  const lower = name.toLowerCase();
-
-  if (lower.includes("reuters")) return 1.0;
-  if (lower.includes("bloomberg")) return 1.0;
-  if (lower.includes("wsj")) return 0.95;
-  if (lower.includes("financial times")) return 0.95;
-  if (lower.includes("cnbc")) return 0.9;
-  if (lower.includes("bbc")) return 0.9;
-
-  return 0.7;
-}
-
-// ==================== 이벤트 중요도 ====================
-function getEventImpactScore(text) {
-  let score = 0;
-
-  if (text.includes("fed") || text.includes("interest rate")) score += 2;
-  if (text.includes("inflation") || text.includes("cpi")) score += 2;
-  if (text.includes("recession")) score += 2;
-  if (text.includes("war") || text.includes("geopolitics")) score += 2;
-  if (text.includes("earnings")) score += 1;
-  if (text.includes("ai") || text.includes("semiconductor")) score += 1;
-
-  return score;
-}
-
-// ==================== 중복 제거 ====================
 function deduplicateArticles(articles) {
   const seen = new Set();
-
   return articles.filter(a => {
     const key = (a.title || "").toLowerCase().slice(0, 100);
     if (seen.has(key)) return false;
@@ -194,33 +212,20 @@ function deduplicateArticles(articles) {
 
 // ==================== sentiment ====================
 function calculateSentiment(articles) {
-  let totalScore = 0;
-  let totalWeight = 0;
+  let score = 0;
 
   articles.forEach(a => {
-    const text = (a.title + " " + a.description).toLowerCase();
-    const weight = getSourceWeight(a.source.name);
-    const impact = getEventImpactScore(text);
-
-    let score = 0;
+    const text = ((a.title || "") + " " + (a.description || "")).toLowerCase();
 
     if (text.includes("inflation")) score -= 1;
     if (text.includes("rate hike")) score -= 2;
     if (text.includes("recession")) score -= 2;
-    if (text.includes("war")) score -= 2;
 
     if (text.includes("growth")) score += 1;
-    if (text.includes("strong earnings")) score += 2;
     if (text.includes("rally")) score += 2;
-    if (text.includes("ai boom")) score += 2;
-
-    const weighted = score * weight * (1 + impact * 0.3);
-
-    totalScore += weighted;
-    totalWeight += weight;
   });
 
-  return totalWeight > 0 ? totalScore / totalWeight : 0;
+  return score;
 }
 
 // ==================== 점수 ====================
@@ -248,12 +253,12 @@ async function generateReport(trigger = "manual") {
     const newsUrl = `https://newsapi.org/v2/everything?q=(stock OR inflation OR fed OR economy)&language=en&sortBy=publishedAt&pageSize=30&apiKey=${NEWS_API_KEY}`;
 
     const newsRes = await fetchWithTimeout(newsUrl);
-    const newsData = await newsRes?.json();
+    const newsData = newsRes ? await safeJsonParse(newsRes) : null;
 
     let articles = newsData?.articles || [];
 
     let filteredArticles = articles.filter(a =>
-      isTrustedSource(a.source.name)
+      a?.source?.name && isTrustedSource(a.source.name)
     );
 
     filteredArticles = deduplicateArticles(filteredArticles);
@@ -264,7 +269,7 @@ async function generateReport(trigger = "manual") {
 
     const rawNews = filteredArticles
       .slice(0, 10)
-      .map(a => a.title + " " + a.description)
+      .map(a => (a.title || "") + " " + (a.description || ""))
       .join("\n");
 
     const structuredIssues = await fetchGPT({
