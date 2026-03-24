@@ -128,7 +128,7 @@ async function getOilPrice() {
   }
 }
 
-// ================= 뉴스 (🔥 개선) =================
+// ================= 뉴스 =================
 async function getNews() {
   const query = `
 ("S&P 500" OR "Federal Reserve" OR inflation OR CPI OR "interest rate" OR recession)
@@ -160,7 +160,7 @@ AND (market OR stocks)
     .slice(0, 15);
 }
 
-// ================= sentiment (🔥 핵심) =================
+// ================= sentiment (🔥 FIX 적용) =================
 async function getSentiment(articles) {
   try {
     let total = 0;
@@ -170,7 +170,17 @@ async function getSentiment(articles) {
       const result = await fetchGPT([
         {
           role: "system",
-          content: "Return only a number between -2 and 2"
+          content: `
+You must return ONLY a number.
+No text, no explanation.
+
+Range:
+-2 = very negative
+-1 = negative
+0 = neutral
+1 = positive
+2 = very positive
+`
         },
         {
           role: "user",
@@ -178,7 +188,11 @@ async function getSentiment(articles) {
         }
       ]);
 
-      const score = parseFloat(result);
+      if (!result) continue;
+
+      // 🔥 숫자만 추출 (핵심)
+      const match = result.match(/-?\\d+(\\.\\d+)?/);
+      const score = match ? parseFloat(match[0]) : NaN;
 
       if (!isNaN(score)) {
         total += score * article.weight;
@@ -256,5 +270,5 @@ app.get("/news/generate", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 R2.5 Server running");
+  console.log("🚀 R2.5 FINAL Server running");
 });
